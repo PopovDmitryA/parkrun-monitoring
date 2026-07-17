@@ -1,0 +1,69 @@
+# parkrun-monitoring
+
+Tracks the public [parkrun](https://www.parkrun.com) events catalogue and
+weekly per-country statistics in a compact local SQLite database, and reports
+catalogue changes (new / disappeared / renamed events) to VK or stdout.
+
+Data sources — two official, cheap, CDN-friendly endpoints (no scraping of
+result protocols, no load on the parkrun website):
+
+| Source | What it gives |
+|---|---|
+| `images.parkrun.com/events.json` | all active events worldwide: slug, names, country, series (5k / junior), coordinates |
+| `results-service.parkrun.com/.../globalChartNumRunnersAndEvents.php` | weekly totals (events / finishers / volunteers) since 2004, worldwide and per country — including countries that left parkrun (Russia, France) |
+
+A full sync makes ~25 HTTP requests with a configurable delay.
+
+Note: the results-service endpoint rejects non-browser user agents with 403,
+so the client defaults to a browser-like UA (override with `PM_USER_AGENT`).
+
+## Setup
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+cp .env.example .env   # optionally set VK_TOKEN / VK_PEER_ID
+```
+
+## Usage
+
+```bash
+.venv/bin/parkrun-monitoring sync      # fetch everything, record changes, notify
+.venv/bin/parkrun-monitoring status    # database summary
+```
+
+`sync` flags: `--catalogue-only`, `--stats-only`, `--no-notify`.
+
+The first run imports the catalogue as a baseline (no change spam). Every
+following run:
+
+* upserts the events catalogue and appends any differences to `event_changes`
+  (`added` / `removed` / `reappeared` / `modified` with a field-level JSON diff);
+* upserts weekly statistics rows, touching only new or revised weeks;
+* sends one VK message when something changed (or prints it without a token).
+
+## Schedule
+
+Three times a week is more than enough — the catalogue changes a few times a
+month. Cron example (Mon / Wed / Sat mornings):
+
+```cron
+0 9 * * 1,3,6 cd /path/to/parkrun-monitoring && .venv/bin/parkrun-monitoring sync >> data/sync.log 2>&1
+```
+
+On macOS, a launchd agent survives sleep better than cron — see
+[deploy/launchd.example.plist](deploy/launchd.example.plist).
+
+## Database
+
+SQLite file at `data/parkrun.db` (override with `PM_DB_PATH`). Schema:
+`events` (one row per event, activity flags), `event_changes` (append-only
+log), `country_weekly_stats` (`WITHOUT ROWID`, keyed by country + week),
+`countries`, `sync_runs`. A full worldwide dataset is ~3 MB.
+
+## Fair use
+
+This tool polls two aggregate endpoints a few times a week — orders of
+magnitude below normal browser traffic. If you fork it for heavier data
+collection, respect parkrun's infrastructure: keep delays generous, cache
+everything, and don't fetch what you already have.
