@@ -15,7 +15,7 @@
     <string>/REPLACE/WITH/PATH/TO/parkrun-monitoring</string>
     <key>ProgramArguments</key>
     <array>
-        <string>.venv/bin/parkrun-monitoring</string>
+        <string>/REPLACE/WITH/PATH/TO/parkrun-monitoring/.venv/bin/parkrun-monitoring</string>
         <string>sync</string>
     </array>
     <key>StartCalendarInterval</key>
