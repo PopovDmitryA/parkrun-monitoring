@@ -6,7 +6,9 @@ import argparse
 import sys
 
 from . import db, notify
+from .archive import import_archived_events
 from .config import load_config
+from .fetch import make_client
 from .history import run_history_sync
 from .push import run_push
 from .sync import check_gate, record_skipped_run, run_sync
@@ -69,6 +71,25 @@ def cmd_fetch_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_archive(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = db.connect(config.db_path)
+    with make_client(config.user_agent) as client:
+        summary = import_archived_events(
+            conn,
+            client,
+            country_code=args.country,
+            from_year=args.from_year,
+            to_year=args.to_year,
+            delay=args.delay,
+        )
+    print(
+        f"import-archive done: {summary['added']} closed events recovered "
+        f"from {summary['snapshots']} snapshots ({summary['failed']} unreadable)"
+    )
+    return 0
+
+
 def cmd_push(args: argparse.Namespace) -> int:
     config = load_config()
     conn = db.connect(config.db_path)
@@ -124,6 +145,18 @@ def main() -> None:
         help="push each event to the canonical DB right after fetching it",
     )
     history_parser.set_defaults(func=cmd_fetch_history)
+
+    archive_parser = sub.add_parser(
+        "import-archive",
+        help="recover closed events from archived events.json snapshots",
+    )
+    archive_parser.add_argument(
+        "--country", type=int, help="only import events of this country code"
+    )
+    archive_parser.add_argument("--from-year", type=int, dest="from_year")
+    archive_parser.add_argument("--to-year", type=int, dest="to_year")
+    archive_parser.add_argument("--delay", type=float, default=1.0)
+    archive_parser.set_defaults(func=cmd_import_archive)
 
     push_parser = sub.add_parser(
         "push", help="push fresh stats/history to the canonical DB via PM_PUSH_COMMAND"

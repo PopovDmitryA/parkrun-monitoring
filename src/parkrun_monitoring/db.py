@@ -102,6 +102,9 @@ _COLUMN_MIGRATIONS = (
     ("events", "history_synced_at", "TEXT"),
     ("events", "history_runs", "INTEGER"),
     ("countries", "stats_synced_at", "TEXT"),
+    # "live" for events seen in the current catalogue, "wayback" for events
+    # recovered from archived snapshots (closed countries and venues).
+    ("events", "catalogue_source", "TEXT"),
 )
 
 

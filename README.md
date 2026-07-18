@@ -28,10 +28,11 @@ cp .env.example .env   # optionally set VK_TOKEN / VK_PEER_ID
 ## Usage
 
 ```bash
-.venv/bin/parkrun-monitoring sync            # catalogue + weekly stats, notify on changes
-.venv/bin/parkrun-monitoring fetch-history   # walk eventhistory summaries, stalest first
-.venv/bin/parkrun-monitoring push            # send fresh data to the canonical DB
-.venv/bin/parkrun-monitoring status          # database summary
+.venv/bin/parkrun-monitoring sync             # catalogue + weekly stats, notify on changes
+.venv/bin/parkrun-monitoring fetch-history    # walk eventhistory summaries, stalest first
+.venv/bin/parkrun-monitoring import-archive   # recover closed events from web.archive.org
+.venv/bin/parkrun-monitoring push             # send fresh data to the canonical DB
+.venv/bin/parkrun-monitoring status           # database summary
 ```
 
 `sync` flags: `--catalogue-only`, `--stats-only`, `--no-notify`.
@@ -45,6 +46,23 @@ moment it is fetched, so an interrupted long run keeps everything it has
 collected. Pushes are watermark-bound deltas (one event ≈ a few hundred KB
 of SQL), and the bundled ssh wrapper multiplexes them over a single
 connection, so hundreds of pushes still authenticate only once.
+
+## Closed events
+
+`events.json` only lists what is running today, so closed venues — and the
+countries that left parkrun, Russia in 2022 and France — disappear from it
+without trace. `import-archive` walks archived copies of that file on
+web.archive.org and restores the missing events, coordinates included, as
+inactive rows tagged `catalogue_source='wayback'`. Live rows are never
+overwritten.
+
+```bash
+parkrun-monitoring import-archive --country 79 --to-year 2022
+```
+
+Flags: `--country CODE`, `--from-year`, `--to-year`, `--delay` (default 1s
+between snapshots). Coverage is bounded by what the archive captured —
+snapshots start around 2019, so venues that closed earlier stay missing.
 
 ## Collector / canonical split
 
