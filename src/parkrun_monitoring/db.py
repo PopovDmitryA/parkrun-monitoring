@@ -110,10 +110,20 @@ _COLUMN_MIGRATIONS = (
 
 
 def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    added_catalogue_source = False
     for table, column, ddl_type in _COLUMN_MIGRATIONS:
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+            if (table, column) == ("events", "catalogue_source"):
+                added_catalogue_source = True
+    if added_catalogue_source:
+        # Rows written before this column existed are all from the live feed
+        # (the Wayback importer is the only source of 'wayback' rows, and it
+        # tags them itself on insert).
+        conn.execute(
+            "UPDATE events SET catalogue_source='live' WHERE catalogue_source IS NULL"
+        )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

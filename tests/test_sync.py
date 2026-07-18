@@ -123,3 +123,20 @@ def test_country_names_are_filled_and_new_ones_reported(conn, monkeypatch, capsy
     assert names[97] == "United Kingdom"
     assert names[999] is None
     assert "country 999" in capsys.readouterr().out
+
+
+def test_new_events_are_tagged_live(conn, monkeypatch):
+    changes = catalogue_sync(conn, monkeypatch, [make_event()])
+    row = conn.execute("SELECT catalogue_source FROM events WHERE id=1").fetchone()
+    assert row["catalogue_source"] == "live"
+
+
+def test_reappeared_event_is_retagged_live(conn, monkeypatch):
+    now = "2026-07-18T00:00:00Z"
+    conn.execute(
+        "INSERT INTO events (id, eventname, country_code, series_id, is_active, "
+        "first_seen, last_seen, catalogue_source) "
+        "VALUES (1, 'bushy', 97, 1, 0, ?, ?, 'wayback')", (now, now))
+    catalogue_sync(conn, monkeypatch, [make_event(1)])
+    row = conn.execute("SELECT catalogue_source, is_active FROM events WHERE id=1").fetchone()
+    assert row["catalogue_source"] == "live" and row["is_active"] == 1

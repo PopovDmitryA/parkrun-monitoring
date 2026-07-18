@@ -124,8 +124,8 @@ def sync_catalogue(conn: sqlite3.Connection, client: httpx.Client) -> ChangeSet:
                 INSERT INTO events (id, eventname, long_name, short_name,
                                     localised_long_name, country_code, series_id,
                                     location, latitude, longitude, is_active,
-                                    first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                                    first_seen, last_seen, catalogue_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'live')
                 """,
                 (event.id, event.eventname, event.long_name, event.short_name,
                  event.localised_long_name, event.country_code, event.series_id,
@@ -147,7 +147,8 @@ def sync_catalogue(conn: sqlite3.Connection, client: httpx.Client) -> ChangeSet:
             """
             UPDATE events SET eventname=?, long_name=?, short_name=?,
                 localised_long_name=?, country_code=?, series_id=?, location=?,
-                latitude=?, longitude=?, is_active=1, last_seen=?, disappeared_at=NULL
+                latitude=?, longitude=?, is_active=1, last_seen=?, disappeared_at=NULL,
+                catalogue_source='live'
             WHERE id=?
             """,
             (event.eventname, event.long_name, event.short_name,
