@@ -59,10 +59,12 @@ def cmd_fetch_history(args: argparse.Namespace) -> int:
         limit=args.limit,
         delay=args.delay if args.delay is not None else config.history_delay,
         eventname=args.event,
+        push_each=args.push_each,
     )
+    pushed = f", {summary['pushed']} pushed" if args.push_each else ""
     print(
         f"fetch-history done: {summary['synced']} events, "
-        f"{summary['rows']} history rows, {summary['failed']} failed"
+        f"{summary['rows']} history rows, {summary['failed']} failed{pushed}"
     )
     return 0
 
@@ -117,6 +119,10 @@ def main() -> None:
         help="seconds between requests (default: PM_HISTORY_DELAY or 30)",
     )
     history_parser.add_argument("--event", help="sync a single event by slug")
+    history_parser.add_argument(
+        "--push-each", action="store_true",
+        help="push each event to the canonical DB right after fetching it",
+    )
     history_parser.set_defaults(func=cmd_fetch_history)
 
     push_parser = sub.add_parser(

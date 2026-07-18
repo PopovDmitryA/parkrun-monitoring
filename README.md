@@ -36,9 +36,15 @@ cp .env.example .env   # optionally set VK_TOKEN / VK_PEER_ID
 
 `sync` flags: `--catalogue-only`, `--stats-only`, `--no-notify`.
 `fetch-history` flags: `--limit N` (default 25), `--delay S` (default 30s
-between requests), `--event slug`. Every pass stamps
+between requests), `--event slug`, `--push-each`. Every pass stamps
 `events.history_synced_at`, so `status` and the table itself always show
 when each event's summary was last walked.
+
+With `--push-each` every event is delivered to the canonical database the
+moment it is fetched, so an interrupted long run keeps everything it has
+collected. Pushes are watermark-bound deltas (one event ≈ a few hundred KB
+of SQL), and the bundled ssh wrapper multiplexes them over a single
+connection, so hundreds of pushes still authenticate only once.
 
 ## Collector / canonical split
 

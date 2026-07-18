@@ -87,9 +87,14 @@ def run_history_sync(
     limit: int,
     delay: float,
     eventname: str | None = None,
+    push_each: bool = False,
 ) -> dict:
+    """Walk event summaries; with push_each every event lands on the canonical
+    database as soon as it is fetched, so an interrupted run keeps its work."""
+    from .push import run_push
+
     events = pick_events_for_history(conn, limit, eventname)
-    summary = {"synced": 0, "rows": 0, "failed": 0}
+    summary = {"synced": 0, "rows": 0, "failed": 0, "pushed": 0}
     consecutive_failures = 0
     with make_client(config.user_agent) as client:
         for i, event in enumerate(events):
@@ -110,4 +115,6 @@ def run_history_sync(
             summary["synced"] += 1
             summary["rows"] += count
             print(f"history ok: {event['eventname']} — {count} runs", flush=True)
+            if push_each and run_push(conn, config, quiet=True):
+                summary["pushed"] += 1
     return summary

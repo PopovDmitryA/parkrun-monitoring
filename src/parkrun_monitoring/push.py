@@ -42,19 +42,29 @@ def _insert_or_replace(table: str, columns: list[str], row: sqlite3.Row) -> str:
 
 
 def build_push_sql(conn: sqlite3.Connection) -> tuple[str, int]:
-    """Return (sql, pushed_events_count) for everything newer than the watermark."""
+    """Return (sql, pushed_events_count) for everything newer than the watermark.
+
+    Both halves are watermark-bound, so a push right after a single event is
+    a small delta rather than a full dump — cheap enough to run after every
+    fetched event.
+    """
     watermark = kv_get(conn, LAST_PUSH_KEY) or ""
     lines = ["BEGIN;"]
 
     stats_columns = ["country_code", "week_date", "events", "finishers", "volunteers"]
-    for row in conn.execute("SELECT * FROM country_weekly_stats"):
-        lines.append(_insert_or_replace("country_weekly_stats", stats_columns, row))
-    for row in conn.execute(
-        "SELECT code, stats_synced_at FROM countries WHERE stats_synced_at IS NOT NULL"
-    ):
+    fresh_countries = conn.execute(
+        "SELECT code, stats_synced_at FROM countries "
+        "WHERE stats_synced_at IS NOT NULL AND stats_synced_at > ?",
+        (watermark,),
+    ).fetchall()
+    for country in fresh_countries:
+        for row in conn.execute(
+            "SELECT * FROM country_weekly_stats WHERE country_code=?", (country["code"],)
+        ):
+            lines.append(_insert_or_replace("country_weekly_stats", stats_columns, row))
         lines.append(
-            f"UPDATE countries SET stats_synced_at={_sql_value(row['stats_synced_at'])} "
-            f"WHERE code={row['code']};"
+            f"UPDATE countries SET stats_synced_at={_sql_value(country['stats_synced_at'])} "
+            f"WHERE code={country['code']};"
         )
 
     fresh_events = conn.execute(
@@ -81,12 +91,17 @@ def build_push_sql(conn: sqlite3.Connection) -> tuple[str, int]:
     return "\n".join(lines), len(fresh_events)
 
 
-def run_push(conn: sqlite3.Connection, config: Config) -> bool:
+def run_push(conn: sqlite3.Connection, config: Config, *, quiet: bool = False) -> bool:
     if not config.push_command:
-        print("push: PM_PUSH_COMMAND is not configured — nothing to do")
+        if not quiet:
+            print("push: PM_PUSH_COMMAND is not configured — nothing to do")
         return False
     started = _now()
     sql, fresh_events = build_push_sql(conn)
+    if not fresh_events and sql.count("\n") <= 1:
+        if not quiet:
+            print("push: nothing new since last push")
+        return True
     result = subprocess.run(
         config.push_command,
         shell=True,
