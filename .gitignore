@@ -1,6 +1,8 @@
 .env
 .venv/
 data/
+*.local.sh
+deploy/parkrun_gate.sh
 __pycache__/
 *.egg-info/
 .pytest_cache/
