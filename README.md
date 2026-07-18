@@ -28,11 +28,27 @@ cp .env.example .env   # optionally set VK_TOKEN / VK_PEER_ID
 ## Usage
 
 ```bash
-.venv/bin/parkrun-monitoring sync      # fetch everything, record changes, notify
-.venv/bin/parkrun-monitoring status    # database summary
+.venv/bin/parkrun-monitoring sync            # catalogue + weekly stats, notify on changes
+.venv/bin/parkrun-monitoring fetch-history   # walk eventhistory summaries, stalest first
+.venv/bin/parkrun-monitoring push            # send fresh data to the canonical DB
+.venv/bin/parkrun-monitoring status          # database summary
 ```
 
 `sync` flags: `--catalogue-only`, `--stats-only`, `--no-notify`.
+`fetch-history` flags: `--limit N` (default 25), `--delay S` (default 30s
+between requests), `--event slug`. Every pass stamps
+`events.history_synced_at`, so `status` and the table itself always show
+when each event's summary was last walked.
+
+## Collector / canonical split
+
+The website WAF may treat a server IP worse than a residential one. The tool
+supports splitting roles: the *canonical* instance (server) runs the
+catalogue sync on cron, while a *collector* instance (e.g. a laptop) runs
+`sync` + `fetch-history` and delivers results with `push`. `push` exports
+fresh rows as portable SQL and pipes them to `PM_PUSH_COMMAND` — any command
+that applies stdin SQL to the canonical database (typically a small ssh
+wrapper). A watermark in the local `kv` table keeps pushes incremental.
 
 The first run imports the catalogue as a baseline (no change spam). Every
 following run:
