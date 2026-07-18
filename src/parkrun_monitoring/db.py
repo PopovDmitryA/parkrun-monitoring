@@ -61,6 +61,26 @@ CREATE TABLE IF NOT EXISTS country_weekly_stats (
     PRIMARY KEY (country_code, week_date)
 ) WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS event_history (
+    event_id          INTEGER NOT NULL,
+    run_number        INTEGER NOT NULL,
+    run_date          TEXT NOT NULL,
+    finishers         INTEGER,
+    volunteers        INTEGER,
+    male_name         TEXT,
+    male_athlete_id   INTEGER,
+    male_time_sec     INTEGER,
+    female_name       TEXT,
+    female_athlete_id INTEGER,
+    female_time_sec   INTEGER,
+    PRIMARY KEY (event_id, run_number)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS sync_runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at     TEXT NOT NULL,
@@ -77,6 +97,21 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 """
 
 
+# Columns added after the initial release; applied idempotently on connect.
+_COLUMN_MIGRATIONS = (
+    ("events", "history_synced_at", "TEXT"),
+    ("events", "history_runs", "INTEGER"),
+    ("countries", "stats_synced_at", "TEXT"),
+)
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, ddl_type in _COLUMN_MIGRATIONS:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -84,4 +119,19 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _apply_column_migrations(conn)
+    conn.commit()
     return conn
+
+
+def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO kv (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )

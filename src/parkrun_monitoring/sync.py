@@ -189,6 +189,9 @@ def sync_weekly_stats(
             changes.stats_failed_countries.append(code)
             continue
         changes.stats_countries += 1
+        conn.execute(
+            "UPDATE countries SET stats_synced_at=? WHERE code=?", (_now(), code)
+        )
         for row in stats:
             cursor = conn.execute(
                 """

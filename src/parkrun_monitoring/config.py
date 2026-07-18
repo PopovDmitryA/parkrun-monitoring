@@ -36,6 +36,8 @@ class Config:
     vk_token: str | None
     vk_peer_id: int | None
     gate_command: str | None
+    push_command: str | None
+    history_delay: float
 
 
 def load_config() -> Config:
@@ -54,4 +56,6 @@ def load_config() -> Config:
         vk_token=os.getenv("VK_TOKEN") or None,
         vk_peer_id=int(peer_raw) if peer_raw else None,
         gate_command=os.getenv("PM_GATE_COMMAND") or None,
+        push_command=os.getenv("PM_PUSH_COMMAND") or None,
+        history_delay=float(os.getenv("PM_HISTORY_DELAY", "30")),
     )

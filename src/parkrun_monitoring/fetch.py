@@ -12,6 +12,7 @@ Two sources are used, both cheap and safe to poll a few times a week:
 
 from __future__ import annotations
 
+import html as html_module
 import re
 from dataclasses import dataclass
 
@@ -22,6 +23,9 @@ from .config import COUNTRY_CHART_URL, EVENTS_JSON_URL
 CHART_ROW_RE = re.compile(
     r'\[ new Date\("(\d{4}-\d{2}-\d{2})"\), ([\dNa.]+),([\dNa.]+),([\dNa.]+) \]'
 )
+HISTORY_ROW_RE = re.compile(r'<tr class="Results-table-row"[^>]*>.*?</tr>', re.S)
+DATA_ATTR_RE = re.compile(r'data-([\w-]+)="([^"]*)"')
+ATHLETE_LINK_RE = re.compile(r'parkrunner/(\d+)/?"[^>]*>([^<]+)</a>')
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,20 @@ class WeeklyStat:
     events: int | None
     finishers: int | None
     volunteers: int | None
+
+
+@dataclass(frozen=True)
+class EventHistoryRow:
+    run_number: int
+    run_date: str
+    finishers: int | None
+    volunteers: int | None
+    male_name: str | None
+    male_athlete_id: int | None
+    male_time_sec: int | None
+    female_name: str | None
+    female_athlete_id: int | None
+    female_time_sec: int | None
 
 
 def make_client(user_agent: str) -> httpx.Client:
@@ -116,3 +134,59 @@ def fetch_country_stats(client: httpx.Client, country_code: int) -> list[WeeklyS
     params = {} if country_code == 0 else {"CountryNum": country_code}
     response = client.get(COUNTRY_CHART_URL, params=params).raise_for_status()
     return parse_chart(response.text)
+
+
+def _digits_to_seconds(raw: str) -> int | None:
+    """parkrun history data-attrs hold times as bare digits, e.g. "1630" = 16:30."""
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return None
+    seconds = int(digits[-2:])
+    minutes = int(digits[-4:-2] or 0)
+    hours = int(digits[:-4] or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _clean(raw: str | None) -> str | None:
+    value = html_module.unescape(raw or "").strip()
+    return value or None
+
+
+def parse_event_history(html: str) -> list[EventHistoryRow]:
+    rows = []
+    for tr in HISTORY_ROW_RE.findall(html):
+        attrs = dict(DATA_ATTR_RE.findall(tr))
+        if "parkrun" not in attrs or "date" not in attrs:
+            continue
+        athlete_ids = {
+            _clean(name): int(athlete_id)
+            for athlete_id, name in ATHLETE_LINK_RE.findall(tr)
+        }
+        male = _clean(attrs.get("male"))
+        female = _clean(attrs.get("female"))
+        rows.append(
+            EventHistoryRow(
+                run_number=int(attrs["parkrun"]),
+                run_date=attrs["date"],
+                finishers=int(attrs["finishers"]) if attrs.get("finishers") else None,
+                volunteers=int(attrs["volunteers"]) if attrs.get("volunteers") else None,
+                male_name=male,
+                male_athlete_id=athlete_ids.get(male),
+                male_time_sec=_digits_to_seconds(attrs.get("maletime", "")),
+                female_name=female,
+                female_athlete_id=athlete_ids.get(female),
+                female_time_sec=_digits_to_seconds(attrs.get("femaletime", "")),
+            )
+        )
+    return rows
+
+
+def event_history_url(country_url: str, eventname: str) -> str:
+    return f"https://{country_url}/{eventname}/results/eventhistory/"
+
+
+def fetch_event_history(
+    client: httpx.Client, country_url: str, eventname: str
+) -> list[EventHistoryRow]:
+    response = client.get(event_history_url(country_url, eventname)).raise_for_status()
+    return parse_event_history(response.text)
