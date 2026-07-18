@@ -54,6 +54,21 @@ month. Cron example (Mon / Wed / Sat mornings):
 On macOS, a launchd agent survives sleep better than cron — see
 [deploy/launchd.example.plist](deploy/launchd.example.plist).
 
+## Coordinating with other parkrun tooling
+
+If the same host runs other parkrun scrapers, set `PM_GATE_COMMAND` to a
+shell command that exits non-zero while syncing is unwise (for example,
+while another tool is serving a parkrun ban cooldown). The sync then stands
+down entirely and records a `skipped` run:
+
+```sh
+#!/bin/sh
+# Example gate: skip while a ban cooldown timestamp is in the future.
+until=$(redis-cli GET parkrun:fetch:ban_cooldown_until | tr -d '\r')
+[ -z "$until" ] && exit 0
+awk -v u="$until" -v n="$(date +%s)" 'BEGIN { exit (n < u) ? 1 : 0 }'
+```
+
 ## Database
 
 SQLite file at `data/parkrun.db` (override with `PM_DB_PATH`). Schema:

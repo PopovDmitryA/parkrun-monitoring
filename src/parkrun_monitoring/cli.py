@@ -7,12 +7,17 @@ import sys
 
 from . import db, notify
 from .config import load_config
-from .sync import run_sync
+from .sync import check_gate, record_skipped_run, run_sync
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
     config = load_config()
     conn = db.connect(config.db_path)
+    skip_reason = check_gate(config)
+    if skip_reason:
+        record_skipped_run(conn, skip_reason)
+        print(f"sync skipped: {skip_reason}")
+        return 0
     try:
         changes = run_sync(
             conn,

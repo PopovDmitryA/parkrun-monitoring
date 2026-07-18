@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -204,6 +205,38 @@ def sync_weekly_stats(
                 (code, row.week_date, row.events, row.finishers, row.volunteers),
             )
             changes.stats_new_rows += cursor.rowcount
+
+
+def check_gate(config: Config) -> str | None:
+    """Run the optional external gate command before syncing.
+
+    Returns None when the sync may proceed, or a human-readable reason to
+    skip. This lets a deployment coordinate with other parkrun tooling on
+    the same host: e.g. exit non-zero from the gate while another scraper
+    is serving a ban cooldown, and this sync will stand down entirely.
+    """
+    if not config.gate_command:
+        return None
+    result = subprocess.run(
+        config.gate_command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode == 0:
+        return None
+    detail = (result.stdout + result.stderr).strip()
+    return f"gate command exited {result.returncode}" + (f": {detail}" if detail else "")
+
+
+def record_skipped_run(conn: sqlite3.Connection, reason: str) -> None:
+    conn.execute(
+        "INSERT INTO sync_runs (started_at, finished_at, status, error) "
+        "VALUES (?, ?, 'skipped', ?)",
+        (_now(), _now(), reason),
+    )
+    conn.commit()
 
 
 def run_sync(

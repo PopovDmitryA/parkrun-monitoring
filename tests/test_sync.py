@@ -88,3 +88,20 @@ def test_format_message_lists_changes():
     changes = ChangeSet(events_total=10, added=[make_event(2, "newpark")])
     text = format_message(changes)
     assert "newpark" in text and "Появились (1)" in text
+
+
+def test_check_gate(monkeypatch):
+    from parkrun_monitoring.config import Config
+    from parkrun_monitoring.sync import check_gate
+    from pathlib import Path
+
+    def cfg(command):
+        return Config(
+            db_path=Path("/tmp/x.db"), user_agent="ua", request_delay=0,
+            vk_token=None, vk_peer_id=None, gate_command=command,
+        )
+
+    assert check_gate(cfg(None)) is None
+    assert check_gate(cfg("true")) is None
+    reason = check_gate(cfg("echo banned until 99; false"))
+    assert reason and "banned until 99" in reason
