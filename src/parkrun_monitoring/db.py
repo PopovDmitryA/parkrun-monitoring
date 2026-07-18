@@ -105,6 +105,7 @@ _COLUMN_MIGRATIONS = (
     # "live" for events seen in the current catalogue, "wayback" for events
     # recovered from archived snapshots (closed countries and venues).
     ("events", "catalogue_source", "TEXT"),
+    ("countries", "name", "TEXT"),
 )
 
 

@@ -106,3 +106,20 @@ def test_check_gate(monkeypatch):
     assert check_gate(cfg("true")) is None
     reason = check_gate(cfg("echo banned until 99; false"))
     assert reason and "banned until 99" in reason
+
+
+def test_country_names_are_filled_and_new_ones_reported(conn, monkeypatch, capsys):
+    import parkrun_monitoring.sync as sync_module
+    from parkrun_monitoring.fetch import CatalogueCountry
+
+    monkeypatch.setattr(
+        sync_module,
+        "fetch_catalogue",
+        lambda client: ([CatalogueCountry(97, "www.parkrun.org.uk", None),
+                         CatalogueCountry(999, "www.parkrun.example", None)], []),
+    )
+    sync_module.sync_catalogue(conn, client=None)
+    names = dict(conn.execute("SELECT code, name FROM countries").fetchall())
+    assert names[97] == "United Kingdom"
+    assert names[999] is None
+    assert "country 999" in capsys.readouterr().out

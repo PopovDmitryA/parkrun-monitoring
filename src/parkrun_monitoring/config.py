@@ -27,6 +27,35 @@ KNOWN_CLOSED_COUNTRIES: dict[int, str] = {
 
 SERIES_NAMES = {1: "parkrun (5k)", 2: "junior parkrun (2k)"}
 
+# events.json carries country codes and domains but no country names, so the
+# names are kept here. Code 0 is parkrun's pseudo-country for worldwide
+# totals. Codes 31 and 79 belong to countries that have left parkrun.
+COUNTRY_NAMES: dict[int, str] = {
+    0: "Worldwide",
+    3: "Australia",
+    4: "Austria",
+    14: "Canada",
+    23: "Denmark",
+    30: "Finland",
+    31: "France",
+    32: "Germany",
+    42: "Ireland",
+    44: "Italy",
+    46: "Japan",
+    54: "Lithuania",
+    57: "Malaysia",
+    64: "Netherlands",
+    65: "New Zealand",
+    67: "Norway",
+    74: "Poland",
+    79: "Russia",
+    82: "Singapore",
+    85: "South Africa",
+    88: "Sweden",
+    97: "United Kingdom",
+    98: "United States",
+}
+
 
 @dataclass(frozen=True)
 class Config:

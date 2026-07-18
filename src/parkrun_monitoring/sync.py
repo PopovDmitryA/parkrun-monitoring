@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .config import Config, GLOBAL_COUNTRY_CODE, KNOWN_CLOSED_COUNTRIES
+from .config import (
+    Config,
+    COUNTRY_NAMES,
+    GLOBAL_COUNTRY_CODE,
+    KNOWN_CLOSED_COUNTRIES,
+)
 from .fetch import (
     CatalogueEvent,
     fetch_catalogue,
@@ -94,6 +99,17 @@ def sync_catalogue(conn: sqlite3.Connection, client: httpx.Client) -> ChangeSet:
             VALUES (?, ?, 0, ?, ?) ON CONFLICT(code) DO NOTHING
             """,
             (code, url, now, now),
+        )
+    # events.json has no country names; fill them in from our own table.
+    for code, name in COUNTRY_NAMES.items():
+        conn.execute(
+            "UPDATE countries SET name=? WHERE code=? AND name IS NULL", (name, code)
+        )
+    for row in conn.execute("SELECT code, url FROM countries WHERE name IS NULL"):
+        print(
+            f"note: country {row['code']} ({row['url']}) is new — "
+            "add it to COUNTRY_NAMES",
+            flush=True,
         )
 
     existing = {row["id"]: row for row in conn.execute("SELECT * FROM events")}
