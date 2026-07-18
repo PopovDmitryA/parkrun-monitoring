@@ -59,7 +59,13 @@ On macOS, a launchd agent survives sleep better than cron — see
 If the same host runs other parkrun scrapers, set `PM_GATE_COMMAND` to a
 shell command that exits non-zero while syncing is unwise (for example,
 while another tool is serving a parkrun ban cooldown). The sync then stands
-down entirely and records a `skipped` run:
+down entirely and records a `skipped` run.
+
+Note that the two sources this tool polls out of the box (the CDN-hosted
+events catalogue and the results-service chart endpoint) live outside the
+WAF surface that bans event/results pages, so a ban there does not require
+gating them — the gate is aimed at deployments that extend the tool to
+fetch regular website pages:
 
 ```sh
 #!/bin/sh
