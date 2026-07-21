@@ -31,7 +31,7 @@ def pick_events_for_history(
 ) -> list[sqlite3.Row]:
     """Active events joined to a fetchable country URL, stalest history first."""
     query = """
-        SELECT e.id, e.eventname, c.url AS country_url
+        SELECT e.id, e.eventname, e.long_name, c.url AS country_url
         FROM events e JOIN countries c ON c.code = e.country_code
         WHERE e.is_active = 1 AND c.url IS NOT NULL
     """
@@ -114,7 +114,9 @@ def run_history_sync(
             consecutive_failures = 0
             summary["synced"] += 1
             summary["rows"] += count
-            print(f"history ok: {event['eventname']} — {count} runs", flush=True)
+            url = f"https://{event['country_url']}/{event['eventname']}/"
+            name = event["long_name"] or event["eventname"]
+            print(f"history ok: {url} {name} — {count} runs", flush=True)
             if push_each and run_push(conn, config, quiet=True):
                 summary["pushed"] += 1
     return summary
