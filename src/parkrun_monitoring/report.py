@@ -7,6 +7,7 @@ working one.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -16,6 +17,17 @@ from .config import Config
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _flag(worker: str) -> str:
+    """Флаг-эмодзи по имени воркера: первые две буквы = код страны, из них
+    строим regional-indicator эмодзи (de → 🇩🇪, it → 🇮🇹). 'mac' — особый."""
+    if worker.startswith("mac"):
+        return "💻"
+    m = re.match(r"([a-z])([a-z])", worker)
+    if not m:
+        return "🏳️"
+    return chr(0x1F1E6 + ord(m.group(1)) - 97) + chr(0x1F1E6 + ord(m.group(2)) - 97)
 
 
 def build_status_report(
@@ -57,7 +69,7 @@ def build_status_report(
             flags.append("работает сейчас")
         suffix = f" [{', '.join(flags)}]" if flags else ""
         lines.append(
-            f"• {w['worker']}: {w['synced'] or 0} локаций, "
+            f"• {_flag(w['worker'])} {w['worker']}: {w['synced'] or 0} локаций, "
             f"+{w['rows'] or 0} строк, фейлов {w['failed'] or 0}{suffix}"
         )
     if active:
