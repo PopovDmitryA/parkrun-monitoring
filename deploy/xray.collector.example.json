@@ -1,0 +1,54 @@
+{
+  "_comment": [
+    "Template for the collector's VPN egress: one xray process, one local",
+    "HTTP-proxy inbound per country, each routed to its own outbound.",
+    "Copy to a location OUTSIDE the repo (e.g. ~/parkrun-vpn/xray.json),",
+    "fill in real outbound credentials, and never commit the filled copy —",
+    "this repository is public.",
+    "Run: docker run -d --name pm-xray --restart unless-stopped --network host",
+    "     -v $HOME/parkrun-vpn/xray.json:/etc/xray/config.json:ro",
+    "     ghcr.io/xtls/xray-core:latest run -config /etc/xray/config.json",
+    "Inbounds listen on 127.0.0.1 only, so nothing is exposed publicly.",
+    "Workers then use --proxy http://127.0.0.1:10811 (10812, 10813, ...)."
+  ],
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    { "listen": "127.0.0.1", "port": 10811, "protocol": "http", "settings": {}, "tag": "in-country1" },
+    { "listen": "127.0.0.1", "port": 10812, "protocol": "http", "settings": {}, "tag": "in-country2" },
+    { "listen": "127.0.0.1", "port": 10813, "protocol": "http", "settings": {}, "tag": "in-country3" }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "COUNTRY1_SERVER_IP",
+            "port": 443,
+            "users": [
+              { "id": "COUNTRY1_UUID", "encryption": "none", "flow": "xtls-rprx-vision" }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "fingerprint": "firefox",
+          "publicKey": "COUNTRY1_REALITY_PUBLIC_KEY",
+          "serverName": "COUNTRY1_SNI",
+          "shortId": "COUNTRY1_SHORT_ID"
+        }
+      },
+      "tag": "out-country1"
+    }
+  ],
+  "routing": {
+    "rules": [
+      { "type": "field", "inboundTag": ["in-country1"], "outboundTag": "out-country1" },
+      { "type": "field", "inboundTag": ["in-country2"], "outboundTag": "out-country2" },
+      { "type": "field", "inboundTag": ["in-country3"], "outboundTag": "out-country3" }
+    ]
+  }
+}

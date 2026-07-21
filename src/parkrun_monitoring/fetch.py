@@ -71,12 +71,12 @@ class EventHistoryRow:
     female_time_sec: int | None
 
 
-def make_client(user_agent: str) -> httpx.Client:
+def make_client(user_agent: str, proxy: str | None = None) -> httpx.Client:
     return httpx.Client(
         headers={"User-Agent": user_agent},
         timeout=30.0,
         follow_redirects=True,
-        transport=httpx.HTTPTransport(retries=2),
+        transport=httpx.HTTPTransport(retries=2, proxy=proxy),
     )
 
 

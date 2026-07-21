@@ -99,7 +99,8 @@ def test_check_gate(monkeypatch):
         return Config(
             db_path=Path("/tmp/x.db"), user_agent="ua", request_delay=0,
             vk_token=None, vk_peer_id=None, gate_command=command,
-            push_command=None, history_delay=0,
+            push_command=None, history_delay=0, worker_delay=0,
+            claim_ttl_minutes=60, claim_command=None,
         )
 
     assert check_gate(cfg(None)) is None

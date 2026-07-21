@@ -67,6 +67,9 @@ class Config:
     gate_command: str | None
     push_command: str | None
     history_delay: float
+    worker_delay: float
+    claim_ttl_minutes: int
+    claim_command: str | None
 
 
 def load_config() -> Config:
@@ -87,4 +90,10 @@ def load_config() -> Config:
         gate_command=os.getenv("PM_GATE_COMMAND") or None,
         push_command=os.getenv("PM_PUSH_COMMAND") or None,
         history_delay=float(os.getenv("PM_HISTORY_DELAY", "30")),
+        # Queue workers pace slower than the interactive history walk: several
+        # of them run at once, so each one alone stays far below any rate that
+        # could look automated.
+        worker_delay=float(os.getenv("PM_WORKER_DELAY", "60")),
+        claim_ttl_minutes=int(os.getenv("PM_CLAIM_TTL_MIN", "60")),
+        claim_command=os.getenv("PM_CLAIM_COMMAND") or None,
     )

@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT
 ) WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS worker_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker      TEXT NOT NULL,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    status      TEXT NOT NULL DEFAULT 'running',  -- running | ok | error | aborted
+    synced      INTEGER NOT NULL DEFAULT 0,
+    rows        INTEGER NOT NULL DEFAULT 0,
+    failed      INTEGER NOT NULL DEFAULT 0,
+    error       TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at     TEXT NOT NULL,
@@ -106,6 +118,9 @@ _COLUMN_MIGRATIONS = (
     # recovered from archived snapshots (closed countries and venues).
     ("events", "catalogue_source", "TEXT"),
     ("countries", "name", "TEXT"),
+    # Worker claims: which worker is fetching this event's history right now.
+    ("events", "claimed_by", "TEXT"),
+    ("events", "claimed_at", "TEXT"),
 )
 
 
@@ -132,6 +147,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Parallel workers write to one file; wait out each other's short locks.
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
     _apply_column_migrations(conn)
     conn.commit()

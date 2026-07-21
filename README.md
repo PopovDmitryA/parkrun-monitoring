@@ -74,6 +74,38 @@ fresh rows as portable SQL and pipes them to `PM_PUSH_COMMAND` — any command
 that applies stdin SQL to the canonical database (typically a small ssh
 wrapper). A watermark in the local `kv` table keeps pushes incremental.
 
+### Parallel queue workers
+
+`work` runs the history walk as a claim-based queue worker, so several
+workers — across processes and even across machines — never fetch the same
+event twice:
+
+```bash
+parkrun-monitoring work --worker de --limit 40 --proxy http://127.0.0.1:10811
+```
+
+Each worker atomically claims the stalest free event (a lease in the
+`events` table with a TTL, so a crashed worker's claim expires), fetches
+its history, releases the claim and pauses `PM_WORKER_DELAY` seconds
+(default 60, ±25% jitter) before the next one. Three consecutive failures
+abort the worker — that usually means the WAF noticed the exit IP.
+`--proxy` lets every worker use its own egress (e.g. one VPN country per
+worker); [deploy/xray.collector.example.json](deploy/xray.collector.example.json)
+is a template for such a multi-country proxy, and
+[deploy/collector_run.sh](deploy/collector_run.sh) starts one worker per
+entry in `PM_WORKERS` (`name:proxy,name:proxy,…`).
+
+A remote worker coordinates through the same claims table by setting
+`PM_CLAIM_COMMAND` — a shell hook (typically ssh) that forwards
+`claim <worker> <ttl>` / `release <worker> <event>` to the canonical
+instance, where they land in the `claim-one` / `release-claim` CLI
+commands. `status-report` summarises recent `worker_runs` activity (and
+sends it to VK when configured):
+
+```bash
+parkrun-monitoring status-report --hours 3
+```
+
 The first run imports the catalogue as a baseline (no change spam). Every
 following run:
 
