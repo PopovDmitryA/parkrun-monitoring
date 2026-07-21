@@ -93,7 +93,7 @@ def load_config() -> Config:
         # Queue workers pace slower than the interactive history walk: several
         # of them run at once, so each one alone stays far below any rate that
         # could look automated.
-        worker_delay=float(os.getenv("PM_WORKER_DELAY", "60")),
+        worker_delay=float(os.getenv("PM_WORKER_DELAY", "40")),
         claim_ttl_minutes=int(os.getenv("PM_CLAIM_TTL_MIN", "60")),
         claim_command=os.getenv("PM_CLAIM_COMMAND") or None,
     )

@@ -103,7 +103,7 @@ def run_worker(
     consecutive_failures = 0
 
     def _pause() -> None:
-        time.sleep(delay * random.uniform(0.75, 1.25))
+        time.sleep(delay * random.uniform(0.85, 1.15))
 
     try:
         with make_client(config.user_agent, proxy=proxy) as client:

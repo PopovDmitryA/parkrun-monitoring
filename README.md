@@ -87,7 +87,7 @@ parkrun-monitoring work --worker de --limit 40 --proxy http://127.0.0.1:10811
 Each worker atomically claims the stalest free event (a lease in the
 `events` table with a TTL, so a crashed worker's claim expires), fetches
 its history, releases the claim and pauses `PM_WORKER_DELAY` seconds
-(default 60, ±25% jitter) before the next one. Three consecutive failures
+(default 40, ±15% jitter) before the next one. Three consecutive failures
 abort the worker — that usually means the WAF noticed the exit IP.
 `--proxy` lets every worker use its own egress (e.g. one VPN country per
 worker); [deploy/xray.collector.example.json](deploy/xray.collector.example.json)
