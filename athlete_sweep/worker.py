@@ -56,8 +56,13 @@ def fetch(client: httpx.Client, url: str) -> tuple[str, str]:
     r = client.get(url)
     body = r.text
     low = body[:2000].lower()
-    if r.status_code in (403, 405) or "x-amzn-waf-action" in {k.lower() for k in r.headers} \
-            or any(m in low for m in WAF_MARKERS):
+    waf_hdr = "x-amzn-waf-action" in {k.lower() for k in r.headers}
+    marker = next((m for m in WAF_MARKERS if m in low), None)
+    if r.status_code in (403, 405) or waf_hdr or marker:
+        print(f"[fetch] protected {url} code={r.status_code} waf_hdr={waf_hdr} "
+              f"marker={marker!r} bytes={len(body)} title="
+              f"{(next(iter(__import__('re').findall(r'<title[^>]*>([^<]*)', body)), '')[:50])!r}",
+              flush=True)
         return "protected", body
     if r.status_code == 404:
         return "not_found", body
