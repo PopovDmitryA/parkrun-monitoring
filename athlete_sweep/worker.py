@@ -20,7 +20,7 @@ import httpx
 import psycopg
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from athlete_sweep.parse import parse_athlete_page  # noqa: E402
+from athlete_sweep.parse import AthleteData, parse_all_runs, parse_summary  # noqa: E402
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -51,9 +51,8 @@ def claim(conn, worker: str, ttl_min: int) -> int | None:
     return row[0] if row else None
 
 
-def fetch(client: httpx.Client, athlete_id: int) -> tuple[str, str]:
+def fetch(client: httpx.Client, url: str) -> tuple[str, str]:
     """Вернуть (kind, html): kind in ok|not_found|protected."""
-    url = f"https://www.parkrun.org.uk/parkrunner/{athlete_id}/all/"
     r = client.get(url)
     body = r.text
     low = body[:2000].lower()
@@ -123,32 +122,39 @@ def main() -> None:
         if aid is None:
             print(f"[{args.worker}] очередь пуста", flush=True)
             break
-        try:
-            kind, html = fetch(client, aid)
-        except Exception as exc:  # сетевой сбой — вернуть в очередь
-            conn.execute("UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
-                         "attempts=attempts+1, error=%s WHERE athlete_id=%s", (repr(exc)[:200], aid))
-            conn.commit()
-            print(f"[{args.worker}] {aid} сетевой сбой: {exc!r}", flush=True)
-            continue
+        base = f"https://www.parkrun.org.uk/parkrunner/{aid}/"
 
-        if kind == "protected":
-            consecutive_protected += 1
-            summary["protected"] += 1
+        def requeue(err: str | None = None) -> None:
             conn.execute("UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
-                         "attempts=attempts+1 WHERE athlete_id=%s", (aid,))
+                         "attempts=attempts+1, error=%s WHERE athlete_id=%s", (err, aid))
             conn.commit()
+
+        # --- страница 1: summary (имя, классификация, ВОЛОНТЁРСТВО) ---
+        try:
+            kind, html = fetch(client, base)
+        except Exception as exc:
+            requeue(repr(exc)[:200]); print(f"[{args.worker}] {aid} сбой: {exc!r}", flush=True); continue
+        if kind == "protected":
+            consecutive_protected += 1; summary["protected"] += 1; requeue()
             if consecutive_protected >= MAX_CONSECUTIVE_PROTECTED:
-                print(f"[{args.worker}] {MAX_CONSECUTIVE_PROTECTED} капчи подряд — стоп (WAF)", flush=True)
-                break
+                print(f"[{args.worker}] {MAX_CONSECUTIVE_PROTECTED} капч подряд — стоп (WAF)", flush=True); break
             continue
         consecutive_protected = 0
+        data = AthleteData(status="not_found") if kind == "not_found" else parse_summary(html, str(aid))
 
-        if kind == "not_found":
-            data = parse_athlete_page("", str(aid))
-            data.status = "not_found"
-        else:
-            data = parse_athlete_page(html, str(aid))
+        # --- страница 2: /all (забеги) — только для валидных профилей ---
+        if data.status == "ok":
+            time.sleep(args.delay * random.uniform(0.85, 1.15))
+            try:
+                kind2, html2 = fetch(client, base + "all/")
+            except Exception as exc:
+                requeue(repr(exc)[:200]); print(f"[{args.worker}] {aid} /all сбой: {exc!r}", flush=True); continue
+            if kind2 == "protected":
+                consecutive_protected += 1; summary["protected"] += 1; requeue()
+                if consecutive_protected >= MAX_CONSECUTIVE_PROTECTED:
+                    print(f"[{args.worker}] {MAX_CONSECUTIVE_PROTECTED} капч подряд — стоп (WAF)", flush=True); break
+                continue
+            data.runs = parse_all_runs(html2, str(aid))
 
         raw = html if data.status == "unclassified" else None
         store(conn, aid, data, raw)

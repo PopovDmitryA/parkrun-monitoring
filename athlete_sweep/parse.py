@@ -164,8 +164,10 @@ def _time_sec(v: str) -> int | None:
     return None
 
 
-def parse_athlete_page(html: str, athlete_id: str) -> AthleteData:
-    """Разобрать /all-страницу атлета. Классификация: not_found / ok /
+def parse_summary(html: str, athlete_id: str) -> AthleteData:
+    """Разобрать SUMMARY-страницу атлета (/parkrunner/{id}/): имя, штрихкод, age,
+    всего пробежек и ВОЛОНТЁРСТВО (оно только здесь, не на /all). Забеги —
+    отдельно из /all (parse_all_runs). Классификация: not_found / ok /
     registered_empty / unclassified (последнее — сырой HTML на ревью)."""
     soup = BeautifulSoup(html, "html.parser")
     title = soup.title.get_text(strip=True).lower() if soup.title else ""
@@ -177,7 +179,7 @@ def parse_athlete_page(html: str, athlete_id: str) -> AthleteData:
     if nb is None:
         # Нет имени+штрихкода. Пустая зарегистрированная (как /1) — короткая,
         # без структуры атлета; всё прочее — на ревью.
-        looks_athlete = "all results" in html.lower() or "parkruns total" in html.lower()
+        looks_athlete = "parkruns total" in html.lower() or "volunteer summary" in html.lower()
         if len(html) < 20000 and not looks_athlete:
             return AthleteData(status="registered_empty")
         return AthleteData(status="unclassified")
@@ -192,6 +194,10 @@ def parse_athlete_page(html: str, athlete_id: str) -> AthleteData:
     vol_detail, vol_total = _volunteer(soup)
     return AthleteData(
         status="ok", name=name, barcode=f"A{barcode}", age_category=age,
-        total_runs=total_runs, runs=_parse_runs(soup, athlete_id),
-        volunteer_detail=vol_detail, volunteer_total=vol_total,
+        total_runs=total_runs, volunteer_detail=vol_detail, volunteer_total=vol_total,
     )
+
+
+def parse_all_runs(html: str, athlete_id: str) -> list[dict]:
+    """Разобрать /all-страницу: полная история забегов (таблица All Results)."""
+    return _parse_runs(BeautifulSoup(html, "html.parser"), athlete_id)
