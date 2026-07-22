@@ -64,3 +64,20 @@ CREATE TABLE IF NOT EXISTS volunteer_detail (
     UNIQUE (athlete_id, role)
 );
 CREATE INDEX IF NOT EXISTS ix_voldetail_athlete ON volunteer_detail (athlete_id);
+
+-- Реестр VPN-выходов: per-IP задержка (лесенка), эскалирующий cooldown,
+-- память об уровне бана (delay_floor растёт до n+1). Менеджер держит поток на
+-- каждый enabled-выход, чей cooldown истёк.
+CREATE TABLE IF NOT EXISTS sweep_exits (
+    name           TEXT PRIMARY KEY,
+    proxy          TEXT NOT NULL,
+    kind           TEXT NOT NULL,               -- vless | hysteria2
+    delay_sec      REAL NOT NULL DEFAULT 13,     -- старт 13с
+    delay_floor    REAL NOT NULL DEFAULT 8,      -- пол (не ниже 8; растёт до n+1 после банов)
+    cooldown_until TIMESTAMPTZ,
+    ban_level      INTEGER NOT NULL DEFAULT 0,   -- индекс в лестнице 1ч..14д
+    last_ok_at     TIMESTAMPTZ,
+    last_waf_at    TIMESTAMPTZ,
+    last_tuned_at  TIMESTAMPTZ,
+    enabled        BOOLEAN NOT NULL DEFAULT TRUE
+);
