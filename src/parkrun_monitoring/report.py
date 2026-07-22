@@ -30,12 +30,20 @@ def build_sweep_section() -> list[str]:
             by = dict(conn.execute("SELECT status, count(*) FROM crawl_queue GROUP BY status").fetchall())
             crawled = conn.execute("SELECT count(*) FROM athletes WHERE source='crawl'").fetchone()[0]
             runs = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            working = conn.execute("SELECT count(*) FROM sweep_exits WHERE enabled "
+                                   "AND (cooldown_until IS NULL OR cooldown_until<=now())").fetchone()[0]
+            cooling = conn.execute("SELECT count(*) FROM sweep_exits WHERE cooldown_until>now()").fetchone()[0]
+            dmin, dmax = conn.execute("SELECT min(delay_sec), max(delay_sec) FROM sweep_exits "
+                                      "WHERE cooldown_until IS NULL OR cooldown_until<=now()").fetchone()
         total = sum(by.values())
         pending = by.get("pending", 0)
         free_gb = shutil.disk_usage("/").free // (1024 ** 3)
         lines = ["", f"🌍 Обход атлетов: пройдено {total - pending:,}/{total:,} "
                      f"(осталось {pending:,})"]
         lines.append(f"• собрано краулером {crawled:,} атлетов, забегов в БД {runs:,}")
+        lines.append(f"• 🔌 выходов рабочих {working} / отлёживается {cooling}"
+                     + (f", задержка {dmin:.0f}–{dmax:.0f}с" if dmin else ""))
         if by.get("unclassified"):
             lines.append(f"• ⚠️ на ревью: {by['unclassified']}")
         lines.append(f"• 💾 свободно на диске: {free_gb} ГБ")
