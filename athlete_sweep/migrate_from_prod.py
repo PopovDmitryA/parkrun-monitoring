@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import os
 import pathlib
+import re
 import sqlite3
 import sys
 from collections import defaultdict
@@ -84,8 +85,12 @@ def main() -> None:
         runs_by[uid].append((slug, edate, enum, tsec, pos, is_pr))
     print(f"забегов подхвачено по участникам: {sum(len(v) for v in runs_by.values())}", flush=True)
 
-    # 3) волонтёрство (role → occasions)
-    vol_by: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    # 3) волонтёрство. ВАЖНО: прод хранит ОДНУ строку на роль, а количество
+    # вшито в текст роли — "Timekeeper (13×)", плюс отдельная "Total Credits (15×)".
+    # Разбираем "Имя (N×)": число → occasions, "Total Credits" → сумма в summary.
+    role_re = re.compile(r"^(.*?)\s*\((\d+)\s*[×xX]\)\s*$")
+    # uid -> {"detail": {role: occ}, "total": int|None}
+    vol_by: dict[str, dict] = defaultdict(lambda: {"detail": {}, "total": None})
     cur = prod.execute("""
         SELECT pt.external_user_id, vr.role
         FROM volunteer_results vr
@@ -97,7 +102,16 @@ def main() -> None:
         uid = str(uid)
         if args.limit and uid not in keep:
             continue
-        vol_by[uid][role or "Unknown"] += 1
+        m = role_re.match(role or "")
+        if m:
+            rname, occ = m.group(1).strip(), int(m.group(2))
+        else:
+            rname, occ = (role or "Unknown").strip(), 1
+        entry = vol_by[uid]
+        if "total credit" in rname.lower():
+            entry["total"] = occ
+        elif rname:
+            entry["detail"][rname] = entry["detail"].get(rname, 0) + occ
 
     # 4) запись в staging
     stg = psycopg.connect(os.environ["PM_WORLD_DSN"])
@@ -118,9 +132,10 @@ def main() -> None:
         for slug, edate, enum, tsec, pos, is_pr in runs:
             r_rows.append((aid, slug, edate, enum, pos, tsec, is_pr))
         vol = vol_by.get(ext)
-        if vol:
-            vs_rows.append((aid, sum(vol.values())))
-            for role, occ in vol.items():
+        if vol and (vol["detail"] or vol["total"] is not None):
+            total = vol["total"] if vol["total"] is not None else sum(vol["detail"].values())
+            vs_rows.append((aid, total))
+            for role, occ in vol["detail"].items():
                 vd_rows.append((aid, role, occ))
 
     def batch(conn, sql, rows, n=5000):
@@ -135,6 +150,14 @@ def main() -> None:
     batch(stg, """INSERT INTO runs
         (athlete_id,event_slug,run_date,run_number,position,finish_time_sec,is_pb)
         VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (athlete_id,event_slug,run_date) DO NOTHING""", r_rows)
+    # Волонтёрство перезаливаем начисто (чинит старую кривую миграцию).
+    aids = [a[0] for a in a_rows]
+    with stg.cursor() as c:
+        for i in range(0, len(aids), 10000):
+            chunk = aids[i:i + 10000]
+            c.execute("DELETE FROM volunteer_detail WHERE athlete_id = ANY(%s)", (chunk,))
+            c.execute("DELETE FROM volunteer_summary WHERE athlete_id = ANY(%s)", (chunk,))
+    stg.commit()
     batch(stg, "INSERT INTO volunteer_summary (athlete_id,total_credits) VALUES (%s,%s) "
                "ON CONFLICT (athlete_id) DO NOTHING", vs_rows)
     batch(stg, "INSERT INTO volunteer_detail (athlete_id,role,occasions) VALUES (%s,%s,%s) "
