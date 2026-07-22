@@ -90,74 +90,79 @@ def record_ban(conn, name: str, delay_at_ban: float) -> None:
 
 
 def exit_thread(name: str, stop: threading.Event) -> None:
+    """Один VPN-выход: claim→fetch→store в цикле. При бане (3 капчи) ставит
+    cooldown и ЗАВЕРШАЕТСЯ — супервайзер освободит слот аккаунта под замену."""
     conn = psycopg.connect(os.environ["PM_WORLD_DSN"], autocommit=False)
-    client = None
-    cur_proxy = None
     consec_waf = 0
-    while not stop.is_set():
-        row = conn.execute(
-            "SELECT proxy, delay_sec, cooldown_until, enabled FROM sweep_exits WHERE name=%s",
-            (name,),
-        ).fetchone()
+    try:
+        proxy, delay = conn.execute(
+            "SELECT proxy, delay_sec FROM sweep_exits WHERE name=%s", (name,)).fetchone()
         conn.commit()
-        proxy, delay, cooldown_until, enabled = row
-        if not enabled:
-            stop.wait(300); continue
-        if cooldown_until and cooldown_until > _now():
-            wait = min((cooldown_until - _now()).total_seconds(), 300)
-            stop.wait(max(wait, 5)); continue
-        maybe_tune(conn, name)
-        if client is None or proxy != cur_proxy:
-            if client:
-                client.close()
-            client = httpx.Client(headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
-                                  proxy=proxy, timeout=30.0, follow_redirects=True)
-            cur_proxy = proxy
-
-        aid = claim(conn, name, 60)
-        if aid is None:
-            print(f"[{name}] очередь пуста", flush=True)
-            stop.wait(120); continue
-        try:
-            kind = process_athlete(conn, client, aid)
-        except Exception as exc:
-            conn.execute("UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
-                         "attempts=attempts+1, error=%s WHERE athlete_id=%s", (repr(exc)[:200], aid))
+        client = httpx.Client(headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
+                              proxy=proxy, timeout=30.0, follow_redirects=True)
+        while not stop.is_set():
+            delay = conn.execute("SELECT delay_sec FROM sweep_exits WHERE name=%s", (name,)).fetchone()[0]
             conn.commit()
-            kind = "error"
-
-        if kind == "protected":
-            consec_waf += 1
-            conn.execute("UPDATE crawl_queue SET status='pending', claimed_by=NULL WHERE athlete_id=%s", (aid,))
-            conn.commit()
-            if consec_waf >= MAX_CONSEC_WAF:
-                record_ban(conn, name, delay)
-                print(f"[{name}] {MAX_CONSEC_WAF} капчи подряд на {delay:.0f}с → cooldown", flush=True)
-                consec_waf = 0
-        else:
-            if consec_waf or kind == "ok":
-                conn.execute("UPDATE sweep_exits SET last_ok_at=now(), ban_level=0 WHERE name=%s "
-                             "AND ban_level>0", (name,))
-                conn.execute("UPDATE sweep_exits SET last_ok_at=now() WHERE name=%s", (name,))
+            aid = claim(conn, name, 60)
+            if aid is None:
+                stop.wait(120); continue
+            try:
+                kind = process_athlete(conn, client, aid)
+            except Exception as exc:
+                conn.execute("UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
+                             "attempts=attempts+1, error=%s WHERE athlete_id=%s", (repr(exc)[:200], aid))
                 conn.commit()
-            consec_waf = 0
-        stop.wait(delay * random.uniform(0.85, 1.15))
-    conn.close()
+                kind = "error"
+            if kind == "protected":
+                consec_waf += 1
+                conn.execute("UPDATE crawl_queue SET status='pending', claimed_by=NULL WHERE athlete_id=%s", (aid,))
+                conn.commit()
+                if consec_waf >= MAX_CONSEC_WAF:
+                    record_ban(conn, name, delay)
+                    print(f"[{name}] {MAX_CONSEC_WAF} капчи на {delay:.0f}с → cooldown, слот освобождён", flush=True)
+                    return
+            else:
+                conn.execute("UPDATE sweep_exits SET last_ok_at=now(), "
+                             "ban_level=CASE WHEN ban_level>0 THEN 0 ELSE ban_level END WHERE name=%s", (name,))
+                conn.commit()
+                maybe_tune(conn, name)
+                consec_waf = 0
+            stop.wait(delay * random.uniform(0.85, 1.15))
+    finally:
+        conn.close()
 
 
 def main() -> None:
-    names = [r[0] for r in psycopg.connect(os.environ["PM_WORLD_DSN"]).execute(
-        "SELECT name FROM sweep_exits WHERE enabled ORDER BY name")]
-    print(f"менеджер: {len(names)} выходов — {', '.join(names)}", flush=True)
+    limit = int(os.getenv("PM_ACCOUNT_LIMIT", "3"))
     stop = threading.Event()
-    threads = [threading.Thread(target=exit_thread, args=(n, stop), daemon=True, name=n) for n in names]
-    for t in threads:
-        t.start()
+    sup = psycopg.connect(os.environ["PM_WORLD_DSN"], autocommit=True)
+    accounts = [r[0] for r in sup.execute("SELECT DISTINCT account FROM sweep_exits WHERE enabled")]
+    print(f"менеджер: аккаунты {accounts}, лимит {limit} потоков/аккаунт", flush=True)
+    running: dict[str, threading.Thread] = {}
     try:
-        while any(t.is_alive() for t in threads):
-            time.sleep(5)
+        while not stop.is_set():
+            for n in [n for n, t in running.items() if not t.is_alive()]:
+                del running[n]
+            for acc in accounts:
+                active = [n for n in running if _ACC.get(n) == acc]
+                need = limit - len(active)
+                if need <= 0:
+                    continue
+                avail = [r[0] for r in sup.execute(
+                    """SELECT name FROM sweep_exits WHERE enabled AND account=%s
+                       AND (cooldown_until IS NULL OR cooldown_until<=now())
+                       ORDER BY ban_level, last_waf_at NULLS FIRST""", (acc,))]
+                for name in [a for a in avail if a not in running][:need]:
+                    _ACC[name] = acc
+                    t = threading.Thread(target=exit_thread, args=(name, stop), daemon=True, name=name)
+                    t.start(); running[name] = t
+                    print(f"[{acc}] +поток {name} (активно {len([x for x in running if _ACC.get(x)==acc])}/{limit})", flush=True)
+            stop.wait(30)
     except KeyboardInterrupt:
         stop.set()
+
+
+_ACC: dict[str, str] = {}
 
 
 if __name__ == "__main__":
