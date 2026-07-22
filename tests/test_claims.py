@@ -64,3 +64,24 @@ def test_drained_queue_returns_none(tmp_path):
     assert claims.claim_next_event(conn, "w1", ttl_minutes=60)
     assert claims.claim_next_event(conn, "w1", ttl_minutes=60)
     assert claims.claim_next_event(conn, "w1", ttl_minutes=60) is None
+
+
+def test_first_pass_only_stops_after_all_synced(tmp_path):
+    """С first_pass_only воркер берёт только непройденные локации и
+    останавливается (None), а не гоняет уже собранные по кругу."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = db.connect(tmp_path / "t.db")
+    _seed(conn, n=2)
+    # Пройти обе локации (проставить history_synced_at) и снять claim.
+    for w in ("w1", "w2"):
+        name = claims.claim_next_event(conn, w, ttl_minutes=60, first_pass_only=True)
+        conn.execute(
+            "UPDATE events SET history_synced_at=?, claimed_by=NULL, claimed_at=NULL "
+            "WHERE eventname=?",
+            (now, name),
+        )
+        conn.commit()
+    # Непройденных не осталось → в first_pass_only режиме очередь пуста.
+    assert claims.claim_next_event(conn, "w3", ttl_minutes=60, first_pass_only=True) is None
+    # А в обычном режиме та же БД отдала бы уже пройденную (обновление истории).
+    assert claims.claim_next_event(conn, "w3", ttl_minutes=60) is not None

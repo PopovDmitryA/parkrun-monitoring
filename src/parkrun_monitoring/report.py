@@ -82,6 +82,8 @@ def build_status_report(
     )
     if remaining:
         lines.append(f"🆕 Осталось впервые пройти: {remaining}")
+    elif config.first_pass_only:
+        lines.append("✅ Все локации пройдены впервые — коллектор ждёт новых задач")
     else:
         lines.append("✅ Все локации пройдены — идёт обновление истории")
     if progress[2]:

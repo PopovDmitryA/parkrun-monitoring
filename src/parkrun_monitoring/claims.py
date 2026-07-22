@@ -27,18 +27,30 @@ def _iso(dt: datetime) -> str:
 
 
 def claim_next_event(
-    conn: sqlite3.Connection, worker: str, ttl_minutes: int
+    conn: sqlite3.Connection,
+    worker: str,
+    ttl_minutes: int,
+    first_pass_only: bool = False,
 ) -> str | None:
-    """Claim the stalest free event and return its eventname (None = drained)."""
+    """Claim the stalest free event and return its eventname (None = drained).
+
+    With ``first_pass_only`` the queue is limited to events never synced
+    before (``history_synced_at IS NULL``): once every location has been
+    walked once, ``claim`` returns None and the worker stops instead of
+    re-walking already-collected history. Turn it on to fill the catalogue
+    once and then idle until there is new work.
+    """
     expiry = _iso(_now() - timedelta(minutes=ttl_minutes))
+    never_synced = "AND e.history_synced_at IS NULL" if first_pass_only else ""
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = conn.execute(
-            """
+            f"""
             SELECT e.eventname FROM events e
             JOIN countries c ON c.code = e.country_code
             WHERE e.is_active = 1 AND c.url IS NOT NULL
               AND (e.claimed_at IS NULL OR e.claimed_at < ?)
+              {never_synced}
             ORDER BY e.history_synced_at IS NOT NULL, e.history_synced_at, e.id
             LIMIT 1
             """,

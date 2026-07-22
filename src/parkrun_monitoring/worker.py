@@ -43,10 +43,16 @@ class ClaimChannel:
         self.command = config.claim_command
         self.worker = worker
         self.ttl = config.claim_ttl_minutes
+        self.first_pass_only = config.first_pass_only
 
     def claim(self) -> str | None:
         if not self.command:
-            return claims.claim_next_event(self.conn, self.worker, self.ttl)
+            return claims.claim_next_event(
+                self.conn, self.worker, self.ttl,
+                first_pass_only=self.first_pass_only,
+            )
+        # Remote (Mac) claims land in the server's claim-one CLI, which reads
+        # PM_FIRST_PASS_ONLY from the server's own .env — no flag to forward.
         result = subprocess.run(
             f"{self.command} claim {self.worker} {self.ttl}",
             shell=True, capture_output=True, text=True, timeout=60,

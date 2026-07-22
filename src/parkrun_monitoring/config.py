@@ -70,6 +70,7 @@ class Config:
     worker_delay: float
     claim_ttl_minutes: int
     claim_command: str | None
+    first_pass_only: bool
 
 
 def load_config() -> Config:
@@ -96,4 +97,7 @@ def load_config() -> Config:
         worker_delay=float(os.getenv("PM_WORKER_DELAY", "40")),
         claim_ttl_minutes=int(os.getenv("PM_CLAIM_TTL_MIN", "60")),
         claim_command=os.getenv("PM_CLAIM_COMMAND") or None,
+        # Только первый проход: разобрать непройденные локации и остановиться,
+        # не гоняя уже собранную историю по кругу (PM_FIRST_PASS_ONLY=1).
+        first_pass_only=os.getenv("PM_FIRST_PASS_ONLY", "").strip() in ("1", "true", "yes"),
     )

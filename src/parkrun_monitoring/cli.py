@@ -124,7 +124,9 @@ def cmd_claim_one(args: argparse.Namespace) -> int:
     """
     config = load_config()
     conn = db.connect(config.db_path)
-    eventname = claims.claim_next_event(conn, args.worker, args.ttl)
+    eventname = claims.claim_next_event(
+        conn, args.worker, args.ttl, first_pass_only=config.first_pass_only
+    )
     if eventname:
         print(eventname)
     return 0
