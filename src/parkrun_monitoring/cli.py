@@ -140,9 +140,13 @@ def cmd_release_claim(args: argparse.Namespace) -> int:
 
 
 def cmd_status_report(args: argparse.Namespace) -> int:
+    # Локации собраны — отчёт теперь про мировой обход атлетов (по выходам).
+    from .report import build_sweep_report
+
     config = load_config()
-    conn = db.connect(config.db_path)
-    text = build_status_report(conn, config, hours=args.hours)
+    text = build_sweep_report()
+    if not text:
+        return 0
     print(text)
     if not args.no_notify:
         notify.send(config, text)

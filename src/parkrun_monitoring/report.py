@@ -17,12 +17,12 @@ from . import claims
 from .config import Config
 
 
-def build_sweep_section() -> list[str]:
-    """Строки VK-отчёта по мировому обходу атлетов (staging Postgres). Пусто,
-    если PM_WORLD_DSN не задан; ошибки не роняют основной отчёт."""
+def build_sweep_report() -> str:
+    """Детальный VK-отчёт по мировому обходу атлетов: прогресс + строка на каждый
+    VPN-выход (флаг, состояние/отлёжка, задержка). Пусто, если PM_WORLD_DSN нет."""
     dsn = os.getenv("PM_WORLD_DSN")
     if not dsn:
-        return []
+        return ""
     try:
         import psycopg
 
@@ -30,26 +30,35 @@ def build_sweep_section() -> list[str]:
             by = dict(conn.execute("SELECT status, count(*) FROM crawl_queue GROUP BY status").fetchall())
             crawled = conn.execute("SELECT count(*) FROM athletes WHERE source='crawl'").fetchone()[0]
             runs = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
-        with psycopg.connect(dsn, connect_timeout=5) as conn:
-            working = conn.execute("SELECT count(*) FROM sweep_exits WHERE enabled "
-                                   "AND (cooldown_until IS NULL OR cooldown_until<=now())").fetchone()[0]
-            cooling = conn.execute("SELECT count(*) FROM sweep_exits WHERE cooldown_until>now()").fetchone()[0]
-            dmin, dmax = conn.execute("SELECT min(delay_sec), max(delay_sec) FROM sweep_exits "
-                                      "WHERE cooldown_until IS NULL OR cooldown_until<=now()").fetchone()
+            exits = conn.execute(
+                """SELECT name, delay_sec, ban_level,
+                          GREATEST(0, EXTRACT(EPOCH FROM (cooldown_until - now())) / 60) AS cd_min
+                   FROM sweep_exits WHERE enabled
+                   ORDER BY (cooldown_until > now()), name"""
+            ).fetchall()
         total = sum(by.values())
         pending = by.get("pending", 0)
         free_gb = shutil.disk_usage("/").free // (1024 ** 3)
-        lines = ["", f"🌍 Обход атлетов: пройдено {total - pending:,}/{total:,} "
-                     f"(осталось {pending:,})"]
-        lines.append(f"• собрано краулером {crawled:,} атлетов, забегов в БД {runs:,}")
-        lines.append(f"• 🔌 выходов рабочих {working} / отлёживается {cooling}"
-                     + (f", задержка {dmin:.0f}–{dmax:.0f}с" if dmin else ""))
+        working = sum(1 for _, _, _, cd in exits if cd <= 0)
+
+        lines = ["🌍 Обход атлетов parkrun",
+                 f"📊 пройдено {total - pending:,}/{total:,}, собрано {crawled:,} атлетов, "
+                 f"{runs:,} забегов",
+                 f"🔌 выходов рабочих {working}/{len(exits)}, 💾 диск {free_gb} ГБ"]
         if by.get("unclassified"):
-            lines.append(f"• ⚠️ на ревью: {by['unclassified']}")
-        lines.append(f"• 💾 свободно на диске: {free_gb} ГБ")
-        return lines
+            lines.append(f"⚠️ на ревью: {by['unclassified']}")
+        lines.append("")
+        for name, delay, bl, cd_min in exits:
+            flag = _flag(name)
+            if cd_min > 0:
+                h, m = divmod(int(cd_min), 60)
+                left = f"{h}ч{m:02d}м" if h else f"{m}м"
+                lines.append(f"{flag} {name}: 💤 отлёжка {left} (ур.{bl}, {delay:.0f}с)")
+            else:
+                lines.append(f"{flag} {name}: ✅ работает ({delay:.0f}с)")
+        return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001 — отчёт best-effort
-        return [f"🌍 Обход атлетов: отчёт недоступен ({exc!r})"[:90]]
+        return f"🌍 Обход атлетов: отчёт недоступен ({exc!r})"[:120]
 
 
 def _iso(dt: datetime) -> str:
@@ -125,5 +134,4 @@ def build_status_report(
         lines.append("✅ Все локации пройдены — идёт обновление истории")
     if progress[2]:
         lines.append(f"⏳ Самый старый проход: {progress[2][:10]}")
-    lines.extend(build_sweep_section())
     return "\n".join(lines)
