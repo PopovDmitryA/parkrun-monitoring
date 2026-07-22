@@ -7,12 +7,41 @@ working one.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from . import claims
 from .config import Config
+
+
+def build_sweep_section() -> list[str]:
+    """Строки VK-отчёта по мировому обходу атлетов (staging Postgres). Пусто,
+    если PM_WORLD_DSN не задан; ошибки не роняют основной отчёт."""
+    dsn = os.getenv("PM_WORLD_DSN")
+    if not dsn:
+        return []
+    try:
+        import psycopg
+
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            by = dict(conn.execute("SELECT status, count(*) FROM crawl_queue GROUP BY status").fetchall())
+            crawled = conn.execute("SELECT count(*) FROM athletes WHERE source='crawl'").fetchone()[0]
+            runs = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
+        total = sum(by.values())
+        pending = by.get("pending", 0)
+        free_gb = shutil.disk_usage("/").free // (1024 ** 3)
+        lines = ["", f"🌍 Обход атлетов: пройдено {total - pending:,}/{total:,} "
+                     f"(осталось {pending:,})"]
+        lines.append(f"• собрано краулером {crawled:,} атлетов, забегов в БД {runs:,}")
+        if by.get("unclassified"):
+            lines.append(f"• ⚠️ на ревью: {by['unclassified']}")
+        lines.append(f"• 💾 свободно на диске: {free_gb} ГБ")
+        return lines
+    except Exception as exc:  # noqa: BLE001 — отчёт best-effort
+        return [f"🌍 Обход атлетов: отчёт недоступен ({exc!r})"[:90]]
 
 
 def _iso(dt: datetime) -> str:
@@ -88,4 +117,5 @@ def build_status_report(
         lines.append("✅ Все локации пройдены — идёт обновление истории")
     if progress[2]:
         lines.append(f"⏳ Самый старый проход: {progress[2][:10]}")
+    lines.extend(build_sweep_section())
     return "\n".join(lines)
