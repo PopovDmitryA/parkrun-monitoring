@@ -38,11 +38,13 @@ def build_sweep_report() -> str:
             ).fetchall()
         total = sum(by.values())
         pending = by.get("pending", 0)
+        done = total - pending
+        pct = (done / total * 100) if total else 0
         free_gb = shutil.disk_usage("/").free // (1024 ** 3)
         working = sum(1 for _, _, _, cd in exits if cd <= 0)
 
         lines = ["🌍 Обход атлетов parkrun",
-                 f"📊 пройдено {total - pending:,}/{total:,}, собрано {crawled:,} атлетов, "
+                 f"📊 пройдено {done:,}/{total:,} ({pct:.1f}%), собрано {crawled:,} атлетов, "
                  f"{runs:,} забегов",
                  f"🔌 выходов рабочих {working}/{len(exits)}, 💾 диск {free_gb} ГБ"]
         if by.get("unclassified"):
