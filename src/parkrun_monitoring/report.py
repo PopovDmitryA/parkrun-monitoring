@@ -75,10 +75,15 @@ def build_status_report(
     if active:
         lines.append(f"🔒 В работе сейчас: {len(active)}")
     synced, total = progress[0] or 0, progress[1] or 0
+    remaining = total - synced
     lines.append(
-        f"📊 Прогресс: {synced}/{total} локаций хоть раз пройдено, "
+        f"📊 Прогресс: {synced}/{total} локаций пройдено, "
         f"{history_total} строк истории всего"
     )
+    if remaining:
+        lines.append(f"🆕 Осталось впервые пройти: {remaining}")
+    else:
+        lines.append("✅ Все локации пройдены — идёт обновление истории")
     if progress[2]:
         lines.append(f"⏳ Самый старый проход: {progress[2][:10]}")
     return "\n".join(lines)
