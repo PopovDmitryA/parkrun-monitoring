@@ -177,10 +177,15 @@ def parse_summary(html: str, athlete_id: str) -> AthleteData:
 
     nb = _name_barcode(soup)
     if nb is None:
-        # Нет имени+штрихкода. Пустая зарегистрированная (как /1) — короткая,
-        # без структуры атлета; всё прочее — на ревью.
+        # Нет блока «Имя (A…)». Пустой профиль (зарегистрирован, но ни одной
+        # пробежки) parkrun отдаёт как ДЖЕНЕРИК-страницу "results | parkrun UK"
+        # — только меню + глобальная статистика, никаких данных атлета.
+        # Распознаём по короткому ВИДИМОМУ тексту / дженерик-title, а не по длине
+        # сырого HTML: она раздута шапкой и соц-иконками (~26 КБ) и порог по ней
+        # ложно уводил такие профили на ревью.
         looks_athlete = "parkruns total" in html.lower() or "volunteer summary" in html.lower()
-        if len(html) < 20000 and not looks_athlete:
+        visible = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+        if not looks_athlete and (len(visible) < 2000 or title == "results | parkrun uk"):
             return AthleteData(status="registered_empty")
         return AthleteData(status="unclassified")
 
