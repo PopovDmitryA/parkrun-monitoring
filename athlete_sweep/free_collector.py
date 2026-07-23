@@ -89,17 +89,17 @@ async def _harvest() -> list[str]:
 
 
 async def _validate(proxy: str, sem: asyncio.Semaphore) -> tuple[str, int] | None:
-    """Две ступени: сначала жив ли (generate_204), потом настоящий parkrun."""
+    """Прокси валиден, если отдаёт НАСТОЯЩУЮ страницу parkrun (атлет 620 →
+    штрихкод A620): это отсекает и мёртвые прокси, и капчу/заглушки за один
+    запрос. Мёртвые отваливаются по таймауту, до parkrun доходят только живые."""
     async with sem:
         try:
-            async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=6,
-                                         headers={"User-Agent": UA}) as c:
-                r = await c.get(LIVENESS_URL)
-                if r.status_code != 204:
-                    return None
-                r2 = await c.get(VALIDATE_URL)
-                if r2.status_code == 200 and VALIDATE_MARK in r2.text:
-                    return proxy, int(r2.elapsed.total_seconds() * 1000)
+            async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=8,
+                                         headers={"User-Agent": UA},
+                                         follow_redirects=True) as c:
+                r = await c.get(VALIDATE_URL)
+                if r.status_code == 200 and VALIDATE_MARK in r.text:
+                    return proxy, int(r.elapsed.total_seconds() * 1000)
         except Exception:
             return None
     return None
