@@ -91,6 +91,20 @@ SOURCES = [
     "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/https.txt",
     "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
     "https://api.openproxylist.xyz/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks-independent/http.txt",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
+    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies_geolocation_anonymous/http.txt",
+    "https://raw.githubusercontent.com/SoliSpirit/proxy-list/main/http.txt",
+    "https://raw.githubusercontent.com/SoliSpirit/proxy-list/main/https.txt",
+    "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/http.txt",
+    "https://raw.githubusercontent.com/gfpcom/free-proxy-list/main/list/http.txt",
+    "https://raw.githubusercontent.com/YasserAABBOU/proxy-list/main/proxies.txt",
+    "https://raw.githubusercontent.com/Firdoxy/proxy-list/main/http.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
+    "https://proxy-spider.com/api/proxies.example.txt",
+    "https://raw.githubusercontent.com/proxylist-to/proxy-list/main/http.txt",
 ]
 
 TARGET = int(os.getenv("PM_FREE_TARGET", "100"))          # желаемое число активных прокси
@@ -105,8 +119,11 @@ VALIDATE_CONC = int(os.getenv("PM_FREE_VALIDATE_CONC", "50"))
 VALIDATE_BATCH = int(os.getenv("PM_FREE_VALIDATE_BATCH", "2000"))  # parkrun-проверка TCP-живых
 _cand_offset = 0
 MAX_CONSEC_ERR = 3                                        # ошибок/капч подряд = отлёжка
-# Ступенчатая отлёжка (короче VPN — free эфемерны): 5м,15м,30м,1ч,2ч,6ч.
-LADDER = [300, 900, 1800, 3600, 7200, 21600]
+# Короткая ступенчатая отлёжка (free эфемерны — держать долго в отлёжке смысла
+# нет, пусть быстрее возвращаются в ротацию): 1м,3м,7м,15м,30м,1ч.
+LADDER = [60, 180, 420, 900, 1800, 3600]
+DELAY_FLOOR = float(os.getenv("PM_FREE_DELAY_FLOOR", "20"))  # ниже суточный тюнинг не опускает
+DELAY_STEP_DOWN = 1.0                                        # −1с/сутки если держит без бана
 
 _stop = asyncio.Event()
 
@@ -294,6 +311,11 @@ async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
     """Один прокси: claim→2 страницы→store. При серии капч/ошибок — отлёжка и выход
     (супервайзер поднимет заново после лестницы)."""
     consec = 0
+    # персональная задержка прокси (суточный тюнинг может её снизить)
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            "SELECT delay_sec FROM free_proxies WHERE proxy=%s", (proxy,))).fetchone()
+    delay = float(row[0]) if row and row[0] else DELAY
     try:
         async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=30,
                                      headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
@@ -324,7 +346,7 @@ async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
                         await conn.execute("UPDATE free_proxies SET last_ok_at=now(), fails=0, "
                                            "ban_level=0, collected_total=collected_total+1, "
                                            "active_seconds=active_seconds+%s WHERE proxy=%s",
-                                           (int(DELAY), proxy))
+                                           (int(delay), proxy))
                         await conn.commit()
                     consec = 0
                 except _Protected:
@@ -337,7 +359,7 @@ async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
                     consec += 1
                     if consec >= MAX_CONSEC_ERR:
                         await _record_ban(pool, proxy); return
-                await asyncio.sleep(DELAY * random.uniform(0.85, 1.15))
+                await asyncio.sleep(delay * random.uniform(0.85, 1.15))
     except Exception:
         await _record_ban(pool, proxy)
 
@@ -383,6 +405,21 @@ async def main() -> None:
             loops += 1
             if (loops == 1 or loops % 10 == 0) and (replenish_task is None or replenish_task.done()):
                 replenish_task = asyncio.create_task(_replenish_bg(pool))
+            # раз в сутки на прокси: держит без бана → задержка −1с (не ниже пола).
+            # Проверяем каждый ~час, но условие «не тюнили сутки» = эффективно 1×/сутки.
+            if loops % 120 == 0:
+                try:
+                    async with pool.connection() as conn:
+                        await conn.execute(
+                            """UPDATE free_proxies
+                               SET delay_sec = GREATEST(%s, delay_sec - %s), last_tuned_at = now()
+                               WHERE ban_level = 0 AND delay_sec > %s
+                                 AND (last_fail_at IS NULL OR last_fail_at < now() - interval '1 day')
+                                 AND (last_tuned_at IS NULL OR last_tuned_at < now() - interval '1 day')""",
+                            (DELAY_FLOOR, DELAY_STEP_DOWN, DELAY_FLOOR))
+                        await conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[tune] ошибка: {exc!r}", flush=True)
             if loops % 5 == 0:
                 print(f"[sup] активных воркеров {len(tasks)}/{TARGET}", flush=True)
             await asyncio.sleep(30)

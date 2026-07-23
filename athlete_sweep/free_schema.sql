@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS free_proxies (
 ALTER TABLE free_proxies ADD COLUMN IF NOT EXISTS collected_total int NOT NULL DEFAULT 0;
 ALTER TABLE free_proxies ADD COLUMN IF NOT EXISTS active_seconds bigint NOT NULL DEFAULT 0;
 ALTER TABLE free_proxies ADD COLUMN IF NOT EXISTS delay_sec real NOT NULL DEFAULT 35;
+ALTER TABLE free_proxies ADD COLUMN IF NOT EXISTS last_tuned_at timestamptz;
 -- пер-бот счётчики для VPN-выходов (табло геймификации)
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS collected_total int NOT NULL DEFAULT 0;
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS active_seconds bigint NOT NULL DEFAULT 0;
