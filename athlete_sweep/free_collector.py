@@ -82,19 +82,22 @@ _stop = asyncio.Event()
 async def _harvest() -> list[str]:
     """Список кандидатов В ПОРЯДКЕ источников (первые в SOURCES — самые «урожайные»,
     их прокси валидируем первыми, не размывая случайной перетасовкой)."""
+    async def _one(c, url):
+        try:
+            r = await c.get(url)
+            return r.text
+        except Exception:
+            return ""
+    async with httpx.AsyncClient(timeout=12) as c:
+        texts = await asyncio.gather(*(_one(c, u) for u in SOURCES))
     seen: set[str] = set()
     ordered: list[str] = []
-    async with httpx.AsyncClient(timeout=20) as c:
-        for url in SOURCES:
-            try:
-                r = await c.get(url)
-                for m in IPPORT_RE.finditer(r.text):
-                    if 0 < int(m.group(2)) < 65536:
-                        p = f"{m.group(1)}:{m.group(2)}"
-                        if p not in seen:
-                            seen.add(p); ordered.append(p)
-            except Exception:
-                continue
+    for text in texts:                       # порядок источников сохранён
+        for m in IPPORT_RE.finditer(text):
+            if 0 < int(m.group(2)) < 65536:
+                p = f"{m.group(1)}:{m.group(2)}"
+                if p not in seen:
+                    seen.add(p); ordered.append(p)
     return ordered
 
 
