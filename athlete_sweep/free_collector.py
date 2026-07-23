@@ -289,7 +289,8 @@ async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
                         await conn.execute("UPDATE crawl_queue SET status=%s, claimed_by=NULL, "
                                            "fetched_at=now() WHERE athlete_id=%s", (data.status, aid))
                         await conn.execute("UPDATE free_proxies SET last_ok_at=now(), fails=0, "
-                                           "ban_level=0 WHERE proxy=%s", (proxy,))
+                                           "ban_level=0, collected_total=collected_total+1 "
+                                           "WHERE proxy=%s", (proxy,))
                         await conn.commit()
                     consec = 0
                 except _Protected:

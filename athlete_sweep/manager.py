@@ -146,7 +146,10 @@ def exit_thread(name: str, stop: threading.Event) -> None:
                     return
             else:
                 conn.execute("UPDATE sweep_exits SET last_ok_at=now(), "
-                             "ban_level=CASE WHEN ban_level>0 THEN 0 ELSE ban_level END WHERE name=%s", (name,))
+                             "collected_total=collected_total+1, "
+                             "active_seconds=active_seconds+%s, "
+                             "ban_level=CASE WHEN ban_level>0 THEN 0 ELSE ban_level END WHERE name=%s",
+                             (int(delay), name))
                 conn.commit()
                 maybe_tune(conn, name)
                 consec_waf = 0
