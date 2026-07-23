@@ -64,8 +64,11 @@ SOURCES = [
 TARGET = int(os.getenv("PM_FREE_TARGET", "100"))          # желаемое число активных прокси
 DELAY = float(os.getenv("PM_FREE_DELAY", "35"))           # задержка между атлетами на прокси
 POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "15"))        # коннектов к БД
-VALIDATE_CONC = int(os.getenv("PM_FREE_VALIDATE_CONC", "200"))
-VALIDATE_BATCH = int(os.getenv("PM_FREE_VALIDATE_BATCH", "1500"))
+# Параллельность валидации держим умеренной: бокс 2-ядерный и делит ресурсы с
+# живым сайтом, а живые прокси медленные (5-9с) — при 200-параллели они не
+# укладывались в таймаут под контеншеном и пул выходил пустым.
+VALIDATE_CONC = int(os.getenv("PM_FREE_VALIDATE_CONC", "50"))
+VALIDATE_BATCH = int(os.getenv("PM_FREE_VALIDATE_BATCH", "800"))
 MAX_CONSEC_ERR = 3                                        # ошибок/капч подряд = отлёжка
 # Ступенчатая отлёжка (короче VPN — free эфемерны): 5м,15м,30м,1ч,2ч,6ч.
 LADDER = [300, 900, 1800, 3600, 7200, 21600]
@@ -94,7 +97,7 @@ async def _validate(proxy: str, sem: asyncio.Semaphore) -> tuple[str, int] | Non
     запрос. Мёртвые отваливаются по таймауту, до parkrun доходят только живые."""
     async with sem:
         try:
-            async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=8,
+            async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=12,
                                          headers={"User-Agent": UA},
                                          follow_redirects=True) as c:
                 r = await c.get(VALIDATE_URL)
