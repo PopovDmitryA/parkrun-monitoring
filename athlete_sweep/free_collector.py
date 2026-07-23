@@ -170,12 +170,12 @@ async def replenish(pool: AsyncConnectionPool) -> None:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(
-                    """INSERT INTO free_proxies (proxy, last_ok_at, latency_ms)
-                       VALUES (%s, now(), %s)
+                    """INSERT INTO free_proxies (proxy, last_ok_at, latency_ms, delay_sec)
+                       VALUES (%s, now(), %s, %s)
                        ON CONFLICT (proxy) DO UPDATE SET last_ok_at=now(),
-                         latency_ms=EXCLUDED.latency_ms, fails=0, ban_level=0,
-                         cooldown_until=NULL""",
-                    [(p, lat) for p, lat in good])
+                         latency_ms=EXCLUDED.latency_ms, delay_sec=EXCLUDED.delay_sec,
+                         fails=0, ban_level=0, cooldown_until=NULL""",
+                    [(p, lat, DELAY) for p, lat in good])
             await conn.commit()
 
 
@@ -289,8 +289,9 @@ async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
                         await conn.execute("UPDATE crawl_queue SET status=%s, claimed_by=NULL, "
                                            "fetched_at=now() WHERE athlete_id=%s", (data.status, aid))
                         await conn.execute("UPDATE free_proxies SET last_ok_at=now(), fails=0, "
-                                           "ban_level=0, collected_total=collected_total+1 "
-                                           "WHERE proxy=%s", (proxy,))
+                                           "ban_level=0, collected_total=collected_total+1, "
+                                           "active_seconds=active_seconds+%s WHERE proxy=%s",
+                                           (int(DELAY), proxy))
                         await conn.commit()
                     consec = 0
                 except _Protected:
