@@ -78,17 +78,22 @@ _stop = asyncio.Event()
 
 # ───────────────────────── валидация прокси ─────────────────────────
 async def _harvest() -> list[str]:
+    """Список кандидатов В ПОРЯДКЕ источников (первые в SOURCES — самые «урожайные»,
+    их прокси валидируем первыми, не размывая случайной перетасовкой)."""
     seen: set[str] = set()
+    ordered: list[str] = []
     async with httpx.AsyncClient(timeout=20) as c:
         for url in SOURCES:
             try:
                 r = await c.get(url)
                 for m in IPPORT_RE.finditer(r.text):
                     if 0 < int(m.group(2)) < 65536:
-                        seen.add(f"{m.group(1)}:{m.group(2)}")
+                        p = f"{m.group(1)}:{m.group(2)}"
+                        if p not in seen:
+                            seen.add(p); ordered.append(p)
             except Exception:
                 continue
-    return list(seen)
+    return ordered
 
 
 async def _validate(proxy: str, sem: asyncio.Semaphore) -> tuple[str, int] | None:
@@ -117,9 +122,8 @@ async def replenish(pool: AsyncConnectionPool) -> None:
         known = {r[0] for r in await (await conn.execute("SELECT proxy FROM free_proxies")).fetchall()}
     if active >= TARGET:
         return
-    cand = [p for p in await _harvest() if p not in known]
-    random.shuffle(cand)
-    cand = cand[:VALIDATE_BATCH]
+    # порядок источников сохранён — берём батч С НАЧАЛА (лучшие списки первыми)
+    cand = [p for p in await _harvest() if p not in known][:VALIDATE_BATCH]
     if not cand:
         return
     sem = asyncio.Semaphore(VALIDATE_CONC)
