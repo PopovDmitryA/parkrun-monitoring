@@ -35,7 +35,10 @@ VALIDATE_MARK = "(A620)"          # штрихкод настоящего про
 IPPORT_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})\b")
 MAX_CANDIDATES = int(os.getenv("PM_FREE_CANDIDATES", "900"))
 PROBE_WORKERS = int(os.getenv("PM_FREE_PROBE_WORKERS", "80"))
-FREE_DELAY = float(os.getenv("PM_FREE_DELAY", "8"))
+# Длинная задержка на free-прокси: каждый делает мало запросов → дольше живёт
+# и реже ловит капчу; объём добираем ЧИСЛОМ прокси в пуле, а не разгоном одного.
+FREE_DELAY = float(os.getenv("PM_FREE_DELAY", "35"))
+FREE_FLOOR = float(os.getenv("PM_FREE_FLOOR", "25"))
 
 
 def harvest() -> list[str]:
@@ -89,11 +92,11 @@ def main() -> None:
         conn.execute(
             """INSERT INTO sweep_exits (name, proxy, kind, account, enabled,
                    delay_sec, delay_floor, cooldown_until, ban_level)
-               VALUES (%s, %s, 'http', 'free', true, %s, 5, NULL, 0)
+               VALUES (%s, %s, 'http', 'free', true, %s, %s, NULL, 0)
                ON CONFLICT (name) DO UPDATE SET
-                   proxy=EXCLUDED.proxy, enabled=true,
-                   cooldown_until=NULL, ban_level=0""",
-            (name, f"http://{proxy}", FREE_DELAY),
+                   proxy=EXCLUDED.proxy, enabled=true, delay_sec=EXCLUDED.delay_sec,
+                   delay_floor=EXCLUDED.delay_floor, cooldown_until=NULL, ban_level=0""",
+            (name, f"http://{proxy}", FREE_DELAY, FREE_FLOOR),
         )
     # ретайр тех free-выходов, что больше не валидны
     rows = conn.execute("SELECT name FROM sweep_exits WHERE account='free'").fetchall()
