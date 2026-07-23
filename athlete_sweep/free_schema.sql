@@ -25,6 +25,9 @@ ALTER TABLE free_proxies ADD COLUMN IF NOT EXISTS delay_sec real NOT NULL DEFAUL
 -- пер-бот счётчики для VPN-выходов (табло геймификации)
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS collected_total int NOT NULL DEFAULT 0;
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS active_seconds bigint NOT NULL DEFAULT 0;
+-- heartbeat: менеджер метит выходы, которым реально выделен воркер (остальные
+-- готовые, но простаивающие из-за лимита потоков, — «в очереди»)
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS worker_heartbeat_at timestamptz;
 -- Активные для сбора: уже валидные и не в отлёжке.
 CREATE INDEX IF NOT EXISTS ix_free_proxies_active ON free_proxies (last_ok_at DESC NULLS LAST)
     WHERE last_ok_at IS NOT NULL;

@@ -185,6 +185,11 @@ def main() -> None:
                     t = threading.Thread(target=exit_thread, args=(name, stop), daemon=True, name=name)
                     t.start(); running[name] = t
                     print(f"[{acc}] +поток {name} (активно {len([x for x in running if _ACC.get(x)==acc])}/{limit})", flush=True)
+            # heartbeat реально работающих выходов — по нему API отличает
+            # «работает» от «в очереди» (готов, но лимит потоков не пустил)
+            if running:
+                sup.execute("UPDATE sweep_exits SET worker_heartbeat_at=now() WHERE name = ANY(%s)",
+                            (list(running.keys()),))
             stop.wait(30)
     except KeyboardInterrupt:
         stop.set()
