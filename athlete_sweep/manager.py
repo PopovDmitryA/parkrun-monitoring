@@ -97,9 +97,11 @@ def record_ban(conn, name: str, delay_at_ban: float) -> None:
     conn.commit()
 
 
-def exit_thread(name: str, stop: threading.Event) -> None:
+def exit_thread(name: str, stop: threading.Event, self_stop: threading.Event) -> None:
     """Один VPN-выход: claim→fetch→store в цикле. При бане (3 капчи) ставит
-    cooldown и ЗАВЕРШАЕТСЯ — супервайзер освободит слот аккаунта под замену."""
+    cooldown и ЗАВЕРШАЕТСЯ — супервайзер освободит слот аккаунта под замену.
+    self_stop — персональный сигнал вытеснения (супервайзер уступает слот выходу
+    с меньшей задержкой)."""
     conn = psycopg.connect(os.environ["PM_WORLD_DSN"], autocommit=False)
     consec_waf = 0
     consec_err = 0
@@ -109,7 +111,7 @@ def exit_thread(name: str, stop: threading.Event) -> None:
         conn.commit()
         client = httpx.Client(headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
                               proxy=proxy, timeout=30.0, follow_redirects=True)
-        while not stop.is_set():
+        while not stop.is_set() and not self_stop.is_set():
             delay = conn.execute("SELECT delay_sec FROM sweep_exits WHERE name=%s", (name,)).fetchone()[0]
             conn.commit()
             aid = claim(conn, name, 60)
@@ -161,10 +163,11 @@ def exit_thread(name: str, stop: threading.Event) -> None:
 def main() -> None:
     stop = threading.Event()
     sup = psycopg.connect(os.environ["PM_WORLD_DSN"], autocommit=True)
-    running: dict[str, threading.Thread] = {}
+    # name -> (thread, self_stop). self_stop.set() = помечен на вытеснение.
+    running: dict[str, tuple[threading.Thread, threading.Event]] = {}
     try:
         while not stop.is_set():
-            for n in [n for n, t in running.items() if not t.is_alive()]:
+            for n in [n for n, (t, _) in running.items() if not t.is_alive()]:
                 del running[n]
             # аккаунты перечитываем каждый цикл. 'free' исключён — бесплатными
             # прокси рулит отдельный async-процесс (free_collector.py).
@@ -172,24 +175,36 @@ def main() -> None:
                 "SELECT DISTINCT account FROM sweep_exits WHERE enabled AND account <> 'free'")]
             for acc in accounts:
                 limit = _limit_for(acc)
-                active = [n for n in running if _ACC.get(n) == acc]
-                need = limit - len(active)
-                if need <= 0:
-                    continue
-                avail = [r[0] for r in sup.execute(
+                # готовые выходы в порядке ПРИОРИТЕТА: меньше задержка между
+                # запросами (быстрее парсит) → затем меньше отработавшее время
+                ready = [r[0] for r in sup.execute(
                     """SELECT name FROM sweep_exits WHERE enabled AND account=%s
                        AND (cooldown_until IS NULL OR cooldown_until<=now())
                        ORDER BY delay_sec ASC, active_seconds ASC, name""", (acc,))]
-                for name in [a for a in avail if a not in running][:need]:
+                desired = ready[:limit]                       # эти ДОЛЖНЫ крутиться
+                running_acc = [n for n in running if _ACC.get(n) == acc]
+                # ВЫТЕСНЕНИЕ: работающий вне desired уступает слот низкозадержному.
+                # Помечаем self_stop — он domолотит свою задержку и завершится сам.
+                for n in running_acc:
+                    if n not in desired and not running[n][1].is_set():
+                        running[n][1].set()
+                        print(f"[{acc}] −{n} вытесняется (приоритет по задержке)", flush=True)
+                # Слот занят, ПОКА вытесняемый жив → замену поднимаем только
+                # следующим циклом, когда он умрёт. Так нет пересечения (никогда
+                # limit+1 разом) и есть пауза «выкл → задержка → вкл».
+                need = limit - len(running_acc)
+                for name in [d for d in desired if d not in running][:max(0, need)]:
                     _ACC[name] = acc
-                    t = threading.Thread(target=exit_thread, args=(name, stop), daemon=True, name=name)
-                    t.start(); running[name] = t
-                    print(f"[{acc}] +поток {name} (активно {len([x for x in running if _ACC.get(x)==acc])}/{limit})", flush=True)
-            # heartbeat реально работающих выходов — по нему API отличает
-            # «работает» от «в очереди» (готов, но лимит потоков не пустил)
-            if running:
+                    ev = threading.Event()
+                    t = threading.Thread(target=exit_thread, args=(name, stop, ev), daemon=True, name=name)
+                    t.start(); running[name] = (t, ev)
+                    print(f"[{acc}] +{name} в работу ({len([x for x in running if _ACC.get(x)==acc])}/{limit})", flush=True)
+            # heartbeat реально работающих (не вытесняемых) — API по нему отличает
+            # «работает» от «в очереди»
+            live = [n for n, (_, ev) in running.items() if not ev.is_set()]
+            if live:
                 sup.execute("UPDATE sweep_exits SET worker_heartbeat_at=now() WHERE name = ANY(%s)",
-                            (list(running.keys()),))
+                            (live,))
             stop.wait(30)
     except KeyboardInterrupt:
         stop.set()
