@@ -179,7 +179,7 @@ def main() -> None:
                 avail = [r[0] for r in sup.execute(
                     """SELECT name FROM sweep_exits WHERE enabled AND account=%s
                        AND (cooldown_until IS NULL OR cooldown_until<=now())
-                       ORDER BY ban_level, last_waf_at NULLS FIRST""", (acc,))]
+                       ORDER BY delay_sec ASC, active_seconds ASC, name""", (acc,))]
                 for name in [a for a in avail if a not in running][:need]:
                     _ACC[name] = acc
                     t = threading.Thread(target=exit_thread, args=(name, stop), daemon=True, name=name)
