@@ -163,9 +163,10 @@ def main() -> None:
         while not stop.is_set():
             for n in [n for n, t in running.items() if not t.is_alive()]:
                 del running[n]
-            # аккаунты перечитываем каждый цикл (free-пул обновляется рефрешером)
+            # аккаунты перечитываем каждый цикл. 'free' исключён — бесплатными
+            # прокси рулит отдельный async-процесс (free_collector.py).
             accounts = [r[0] for r in sup.execute(
-                "SELECT DISTINCT account FROM sweep_exits WHERE enabled")]
+                "SELECT DISTINCT account FROM sweep_exits WHERE enabled AND account <> 'free'")]
             for acc in accounts:
                 limit = _limit_for(acc)
                 active = [n for n in running if _ACC.get(n) == acc]
