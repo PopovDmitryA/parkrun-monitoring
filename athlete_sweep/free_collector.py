@@ -119,9 +119,12 @@ VALIDATE_CONC = int(os.getenv("PM_FREE_VALIDATE_CONC", "50"))
 VALIDATE_BATCH = int(os.getenv("PM_FREE_VALIDATE_BATCH", "2000"))  # parkrun-проверка TCP-живых
 _cand_offset = 0
 MAX_CONSEC_ERR = 3                                        # ошибок/капч подряд = отлёжка
-# Короткая ступенчатая отлёжка (free эфемерны — держать долго в отлёжке смысла
-# нет, пусть быстрее возвращаются в ротацию): 1м,3м,7м,15м,30м,1ч.
-LADDER = [60, 180, 420, 900, 1800, 3600]
+# Эскалирующая отлёжка. Ранние ступени короткие (разовый сбой — прокси эфемерны,
+# пусть быстро возвращаются): 1м,3м,7м,15м,30м,1ч. Дальше — длинный хвост до недели,
+# чтобы ХРОНИЧЕСКИ дохлые (ban_level рос до 30+, а лесенка капалась на 1ч и они
+# бесконечно возвращались-падали-парковались) уходили надолго = де-факто на пенсию.
+# Любой успех сбрасывает ban_level в 0 (см. worker), так что реально ожившие вернутся.
+LADDER = [60, 180, 420, 900, 1800, 3600, 10800, 21600, 43200, 86400, 259200, 604800]
 DELAY_FLOOR = float(os.getenv("PM_FREE_DELAY_FLOOR", "20"))  # ниже суточный тюнинг не опускает
 DELAY_STEP_DOWN = 1.0                                        # −1с/сутки если держит без бана
 
@@ -330,7 +333,7 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
             "SELECT delay_sec FROM free_proxies WHERE proxy=%s", (proxy,))).fetchone()
     delay = float(row[0]) if row and row[0] else DELAY
     try:
-        async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=30,
+        async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=20,
                                      headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
                                      follow_redirects=True) as client:
             while not _stop.is_set():
