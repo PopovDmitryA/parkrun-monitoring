@@ -25,13 +25,13 @@ import os
 import random
 import re
 import signal
-import sys
+
+import gzip
+import shutil
+from pathlib import Path
 
 import httpx
 from psycopg_pool import AsyncConnectionPool
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from athlete_sweep.parse import AthleteData, parse_all_runs, parse_summary  # noqa: E402
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -124,6 +124,21 @@ MAX_CONSEC_ERR = 3                                        # ошибок/кап�
 LADDER = [60, 180, 420, 900, 1800, 3600]
 DELAY_FLOOR = float(os.getenv("PM_FREE_DELAY_FLOOR", "20"))  # ниже суточный тюнинг не опускает
 DELAY_STEP_DOWN = 1.0                                        # −1с/сутки если держит без бана
+
+# FETCH-ONLY: прокси только качают сырьё в папку, парсинг — отдельным ПК потом.
+RAW_DIR = Path(os.getenv(
+    "PM_RAW_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw")))
+BATCH_SIZE = int(os.getenv("PM_FETCH_BATCH", "200"))         # размер брони оркестратора
+LEASE_MIN = int(os.getenv("PM_LEASE_MIN", "30"))            # зависшие reserved/dispatched → pending
+MIN_FREE_GB = float(os.getenv("PM_DISK_MIN_GB", "3"))       # <этого свободного — стоп сбора
+
+
+def disk_free_gb() -> float:
+    try:
+        return shutil.disk_usage(str(RAW_DIR)).free / (1024 ** 3)
+    except OSError:
+        return 999.0
 
 _stop = asyncio.Event()
 
@@ -230,17 +245,51 @@ async def replenish(pool: AsyncConnectionPool) -> None:
 
 
 # ───────────────────────── сбор через прокси ─────────────────────────
-async def _claim(pool: AsyncConnectionPool, worker: str) -> int | None:
+def save_html(aid: int, kind: str, html: str) -> None:
+    """Сырьё в data/raw/{aid//10000}/{aid}.{kind}.html.gz (шардинг + gzip ~10x)."""
+    d = RAW_DIR / str(aid // 10000)
+    d.mkdir(parents=True, exist_ok=True)
+    with gzip.open(d / f"{aid}.{kind}.html.gz", "wb") as f:
+        f.write(html.encode("utf-8", "replace"))
+
+
+async def _claim_batch(pool: AsyncConnectionPool, n: int) -> list[int]:
+    """ОРКЕСТРАТОР: забронировать пачку pending (или зависших reserved/dispatched
+    по лизу) → status='reserved'. Один запрос вместо N — убирает claim-контеншн."""
     async with pool.connection() as conn:
-        row = await (await conn.execute(
-            """UPDATE crawl_queue SET claimed_by=%s, claimed_at=now()
-               WHERE athlete_id = (SELECT athlete_id FROM crawl_queue
+        rows = await (await conn.execute(
+            """UPDATE crawl_queue SET status='reserved', claimed_by='orchestrator', claimed_at=now()
+               WHERE athlete_id IN (
+                   SELECT athlete_id FROM crawl_queue
                    WHERE status='pending'
-                     AND (claimed_at IS NULL OR claimed_at < now() - interval '60 min')
-                   ORDER BY athlete_id FOR UPDATE SKIP LOCKED LIMIT 1)
-               RETURNING athlete_id""", (worker,))).fetchone()
+                      OR (status IN ('reserved','dispatched')
+                          AND claimed_at < now() - (%s || ' minutes')::interval)
+                   ORDER BY athlete_id
+                   FOR UPDATE SKIP LOCKED LIMIT %s)
+               RETURNING athlete_id""", (LEASE_MIN, n))).fetchall()
         await conn.commit()
-        return row[0] if row else None
+        return [r[0] for r in rows]
+
+
+async def dispatcher(pool: AsyncConnectionPool, queue: "asyncio.Queue[int]") -> None:
+    """Держит in-memory очередь заполненной: как проседает — бронирует пачку в БД."""
+    while not _stop.is_set():
+        free = disk_free_gb()
+        if free < MIN_FREE_GB:
+            print(f"[disk] свободно {free:.1f}ГБ < {MIN_FREE_GB}ГБ — СТОП сбора "
+                  f"(разбери/удали сырьё на отдельном ПК)", flush=True)
+            await asyncio.sleep(60)
+            continue
+        if queue.qsize() < BATCH_SIZE // 2:
+            try:
+                ids = await _claim_batch(pool, BATCH_SIZE)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[orch] ошибка брони: {exc!r}", flush=True); ids = []
+            for aid in ids:
+                await queue.put(aid)
+            await asyncio.sleep(1 if ids else 20)  # пусто → реже дёргаем БД
+        else:
+            await asyncio.sleep(2)
 
 
 def _classify(status_code: int, headers, body: str) -> str:
@@ -251,41 +300,6 @@ def _classify(status_code: int, headers, body: str) -> str:
     if status_code == 404:
         return "not_found"
     return "ok"
-
-
-async def _store(pool: AsyncConnectionPool, aid: int, data: AthleteData, raw: str | None) -> None:
-    async with pool.connection() as conn:
-        await conn.execute(
-            """INSERT INTO athletes
-               (athlete_id,name,barcode,age_category,total_runs,status,parsed_at,source,raw_html)
-               VALUES (%s,%s,%s,%s,%s,%s,now(),'crawl',%s)
-               ON CONFLICT (athlete_id) DO UPDATE SET
-                 name=EXCLUDED.name, barcode=EXCLUDED.barcode, age_category=EXCLUDED.age_category,
-                 total_runs=EXCLUDED.total_runs, status=EXCLUDED.status, parsed_at=now(),
-                 source='crawl', raw_html=EXCLUDED.raw_html, updated_at=now()""",
-            (aid, data.name, data.barcode, data.age_category, data.total_runs, data.status, raw))
-        if data.runs:
-            await conn.execute("DELETE FROM runs WHERE athlete_id=%s", (aid,))
-            async with conn.cursor() as cur:
-                await cur.executemany(
-                    """INSERT INTO runs (athlete_id,event_slug,event_name,run_date,run_number,
-                       position,finish_time_sec,age_grade) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT (athlete_id,event_slug,run_date) DO NOTHING""",
-                    [(aid, r["event_slug"], r["event_name"], r["run_date"], r["run_number"],
-                      r["position"], r["finish_time_sec"], r["age_grade"]) for r in data.runs])
-        if data.volunteer_total:
-            await conn.execute(
-                "INSERT INTO volunteer_summary (athlete_id,total_credits) VALUES (%s,%s) "
-                "ON CONFLICT (athlete_id) DO UPDATE SET total_credits=EXCLUDED.total_credits",
-                (aid, data.volunteer_total))
-        if data.volunteer_detail:
-            await conn.execute("DELETE FROM volunteer_detail WHERE athlete_id=%s", (aid,))
-            async with conn.cursor() as cur:
-                await cur.executemany(
-                    "INSERT INTO volunteer_detail (athlete_id,role,occasions) VALUES (%s,%s,%s) "
-                    "ON CONFLICT (athlete_id,role) DO NOTHING",
-                    [(aid, v["role"], v["occasions"]) for v in data.volunteer_detail])
-        await conn.commit()
 
 
 async def _requeue(pool: AsyncConnectionPool, aid: int, err: str | None = None) -> None:
@@ -307,11 +321,10 @@ async def _record_ban(pool: AsyncConnectionPool, proxy: str) -> None:
         await conn.commit()
 
 
-async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
-    """Один прокси: claim→2 страницы→store. При серии капч/ошибок — отлёжка и выход
-    (супервайзер поднимет заново после лестницы)."""
+async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[int]") -> None:
+    """FETCH-ONLY: берёт ID из очереди оркестратора → качает 2 страницы →
+    gzip в папку → status='collected'. НИКАКОГО парсинга (он на отдельном ПК)."""
     consec = 0
-    # персональная задержка прокси (суточный тюнинг может её снизить)
     async with pool.connection() as conn:
         row = await (await conn.execute(
             "SELECT delay_sec FROM free_proxies WHERE proxy=%s", (proxy,))).fetchone()
@@ -321,28 +334,31 @@ async def worker(pool: AsyncConnectionPool, proxy: str) -> None:
                                      headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
                                      follow_redirects=True) as client:
             while not _stop.is_set():
-                aid = await _claim(pool, proxy)
-                if aid is None:
-                    await asyncio.sleep(30); continue
+                try:
+                    aid = await asyncio.wait_for(queue.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    continue
                 base = f"https://www.parkrun.org.uk/parkrunner/{aid}/"
                 try:
+                    async with pool.connection() as conn:
+                        await conn.execute("UPDATE crawl_queue SET status='dispatched', claimed_by=%s, "
+                                           "claimed_at=now() WHERE athlete_id=%s", (proxy, aid))
+                        await conn.commit()
                     r = await client.get(base)
-                    kind = _classify(r.status_code, r.headers, r.text)
-                    if kind == "protected":
+                    if _classify(r.status_code, r.headers, r.text) == "protected":
                         raise _Protected()
-                    data = (AthleteData(status="not_found") if kind == "not_found"
-                            else parse_summary(r.text, str(aid)))
-                    if data.status == "ok":
+                    save_html(aid, "summary", r.text)
+                    # /all тянем только для реального профиля (дешёвая эвристика без BS4)
+                    low = r.text.lower()
+                    if "(a" in low and "parkruns total" in low:
                         await asyncio.sleep(1 + random.random())
                         r2 = await client.get(base + "all/")
                         if _classify(r2.status_code, r2.headers, r2.text) == "protected":
                             raise _Protected()
-                        data.runs = parse_all_runs(r2.text, str(aid))
-                    raw = r.text if data.status == "unclassified" else None
-                    await _store(pool, aid, data, raw)
+                        save_html(aid, "all", r2.text)
                     async with pool.connection() as conn:
-                        await conn.execute("UPDATE crawl_queue SET status=%s, claimed_by=NULL, "
-                                           "fetched_at=now() WHERE athlete_id=%s", (data.status, aid))
+                        await conn.execute("UPDATE crawl_queue SET status='collected', claimed_by=NULL, "
+                                           "fetched_at=now() WHERE athlete_id=%s", (aid,))
                         await conn.execute("UPDATE free_proxies SET last_ok_at=now(), fails=0, "
                                            "ban_level=0, collected_total=collected_total+1, "
                                            "active_seconds=active_seconds+%s WHERE proxy=%s",
@@ -380,7 +396,10 @@ async def main() -> None:
     dsn = os.environ["PM_WORLD_DSN"]
     pool = AsyncConnectionPool(dsn, min_size=2, max_size=POOL_MAX, open=False)
     await pool.open()
-    print(f"free-сборщик: TARGET={TARGET}, DELAY={DELAY}с, DB-пул={POOL_MAX}", flush=True)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"free-сборщик (FETCH-ONLY): TARGET={TARGET}, DELAY={DELAY}с, папка={RAW_DIR}", flush=True)
+    queue: "asyncio.Queue[int]" = asyncio.Queue(maxsize=BATCH_SIZE * 3)
+    disp_task = asyncio.create_task(dispatcher(pool, queue))
     tasks: dict[str, asyncio.Task] = {}
     replenish_task: asyncio.Task | None = None
     loops = 0
@@ -399,7 +418,9 @@ async def main() -> None:
                        ORDER BY ban_level, last_ok_at DESC LIMIT %s""", (TARGET,))).fetchall()]
             for proxy in active:
                 if proxy not in tasks:
-                    tasks[proxy] = asyncio.create_task(worker(pool, proxy))
+                    tasks[proxy] = asyncio.create_task(worker(pool, proxy, queue))
+            if loops % 5 == 0:
+                print(f"[orch] очередь {queue.qsize()} ID в памяти", flush=True)
             # добор новых прокси — в ФОНЕ (не блокирует запуск/работу воркеров),
             # не чаще раза в ~5 мин
             loops += 1
@@ -425,7 +446,8 @@ async def main() -> None:
             await asyncio.sleep(30)
     finally:
         _stop.set()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        disp_task.cancel()
+        await asyncio.gather(*tasks.values(), disp_task, return_exceptions=True)
         await pool.close()
 
 
