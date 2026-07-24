@@ -105,6 +105,25 @@ SOURCES = [
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
     "https://proxy-spider.com/api/proxies.example.txt",
     "https://raw.githubusercontent.com/proxylist-to/proxy-list/main/http.txt",
+    # добавлено 25.07 — расширение пула
+    "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt",
+    "https://raw.githubusercontent.com/mertguvencli/http-proxy-list/main/proxy-list/data.txt",
+    "https://raw.githubusercontent.com/caliphdev/Proxy-List/master/http.txt",
+    "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/http.txt",
+    "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt",
+    "https://raw.githubusercontent.com/An0nUD4Y/Free-Proxy-List/main/proxylist.txt",
+    "https://raw.githubusercontent.com/Vann-Dev/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/prxchk/proxy-list/main/all.txt",
+    "https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt",
+    "https://raw.githubusercontent.com/UserR3X/proxy-list/main/online/http.txt",
+    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/connect.txt",
+    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/https.txt",
+    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+    "https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt",
+    "https://raw.githubusercontent.com/berkay-digital/Proxy-Scraper/main/proxies.txt",
+    "https://raw.githubusercontent.com/zenjahid/FreeProxy4u/master/http.txt",
 ]
 
 TARGET = int(os.getenv("PM_FREE_TARGET", "100"))          # желаемое число активных прокси

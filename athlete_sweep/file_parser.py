@@ -129,12 +129,18 @@ def claim(conn, worker: str, n: int) -> list[int]:
     ОСТАВЛЯЕМ 'collected' (пока не распарсили — это честно «в обработке»). Берём
     свободные (claimed_at пуст/просрочен), под SKIP LOCKED — параллельные парсеры
     не столкнутся."""
+    # Ключ на claimed_by, НЕ на claimed_at: коллектор при пометке 'collected'
+    # чистит claimed_by=NULL, но claimed_at оставляет от фазы dispatch (свежий).
+    # Фильтр по claimed_at пропускал бы свежесобранное на 15 мин → парсер «пусто».
+    # Берём: свободные (claimed_by NULL) + брошенные другим парсером (аренда истекла).
     rows = conn.execute(
         """
         WITH c AS (
             SELECT athlete_id FROM crawl_queue
             WHERE status='collected'
-              AND (claimed_at IS NULL OR claimed_at < now() - make_interval(mins => %s))
+              AND (claimed_by IS NULL
+                   OR (claimed_by LIKE 'parser:%%'
+                       AND claimed_at < now() - make_interval(mins => %s)))
             ORDER BY fetched_at
             FOR UPDATE SKIP LOCKED
             LIMIT %s
