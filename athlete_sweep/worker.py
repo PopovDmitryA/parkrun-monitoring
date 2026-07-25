@@ -103,6 +103,28 @@ def store(conn, athlete_id: int, data, raw_html: str | None) -> None:
             "ON CONFLICT (athlete_id,role) DO NOTHING",
             [(athlete_id, v["role"], v["occasions"]) for v in data.volunteer_detail],
         )
+    mark_russian(conn, athlete_id)
+
+
+def mark_russian(conn, athlete_id: int) -> None:
+    """is_russian_runner = ХОТЯ БЫ ОДИН забег в России (не доля!).
+
+    Смысл флага: по нему атлеты уедут в БД сайта run5k.run (все, кто хоть раз
+    бежал в РФ), остальной мир останется в большой parkrun-базе рядом. Поэтому
+    порог именно 1 забег, а не >=50%.
+
+    Слаги в runs делаются из НАЗВАНИЯ (с дефисами), канонический parkrun-слаг —
+    без разделителей, поэтому джойн со снятием не-алфанумерики (иначе матч ~40%).
+    """
+    conn.execute(
+        """UPDATE athletes SET is_russian_runner = EXISTS (
+               SELECT 1 FROM runs r
+               JOIN event_country ec
+                 ON ec.slug = regexp_replace(r.event_slug, '[^a-z0-9]', '', 'g')
+               WHERE r.athlete_id = %s AND lower(ec.iso2) = 'ru')
+           WHERE athlete_id = %s""",
+        (athlete_id, athlete_id),
+    )
 
 
 def main() -> None:

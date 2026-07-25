@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS athletes (
     barcode            TEXT,
     age_category       TEXT,
     total_runs         INTEGER,
-    is_russian_runner  BOOLEAN,          -- >=50% забегов в РФ; считаем ПОСЛЕ парсинга истории
+    is_russian_runner  BOOLEAN,          -- ХОТЯ БЫ ОДИН забег в РФ (не доля!) — эти уедут в БД сайта run5k.run
     status             TEXT NOT NULL,    -- класс страницы (см. crawl_queue.status)
     parsed_at          TIMESTAMPTZ,      -- реальная дата чтения страницы (для миграции — из легаси last_updated)
     source             TEXT NOT NULL DEFAULT 'crawl',  -- 'crawl' | 'legacy_migration'
