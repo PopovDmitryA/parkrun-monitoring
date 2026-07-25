@@ -126,7 +126,7 @@ SOURCES = [
     "https://raw.githubusercontent.com/zenjahid/FreeProxy4u/master/http.txt",
 ]
 
-TARGET = int(os.getenv("PM_FREE_TARGET", "100"))          # желаемое число активных прокси
+TARGET = int(os.getenv("PM_FREE_TARGET", "200"))          # желаемое число активных прокси (одновременных воркеров)
 DELAY = float(os.getenv("PM_FREE_DELAY", "35"))           # задержка между атлетами на прокси
 POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "15"))        # коннектов к БД
 # Параллельность валидации держим умеренной: бокс 2-ядерный и делит ресурсы с
