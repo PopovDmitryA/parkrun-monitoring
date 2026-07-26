@@ -15,6 +15,12 @@ SFTP к папке через paramiko/sshtunnel (БЕЗ sshpass — чтобы 
 обработки виден на табло как «обработка/час» (по ``athletes.parsed_at``, его
 ставит ``store``).
 
+Параллелизм: ``--threads N`` — N страниц одновременно, у каждого потока свой
+SFTP-канал и свой коннект к БД поверх ОДНОЙ ssh-сессии (не плодим логины). Узкое
+место — не процессор, а ожидание сети: на канале с задержкой (VPN) 8 потоков дают
+~9x (замер: 13/мин → 119/мин). Выше 8 прирост почти пропадает — упирается в общий
+ssh-транспорт; если нужно больше, запускай второй процесс парсера.
+
 Запуск:
   macOS:    make parkrun → пункт 3   (или: python -m athlete_sweep.file_parser)
   Windows:  py -m athlete_sweep.file_parser   (из клона parkrun-monitoring)
@@ -31,6 +37,7 @@ import os
 import platform
 import socket
 import sys
+import threading
 import time
 from getpass import getpass
 
@@ -102,15 +109,21 @@ def open_db(host: str, user: str, pwd: str):
         set_keepalive=30.0,
     )
     tun.start()
+    dsn = f"postgresql://{PM_USER}:{PM_PASS}@127.0.0.1:{tun.local_bind_port}/{PM_DB}"
+    return tun, dsn
+
+
+def db_connect(dsn: str):
+    """Свой коннект на поток: psycopg-соединение делить между потоками нельзя."""
     import psycopg
 
-    dsn = f"postgresql://{PM_USER}:{PM_PASS}@127.0.0.1:{tun.local_bind_port}/{PM_DB}"
-    conn = psycopg.connect(dsn, autocommit=False, connect_timeout=10)
-    return tun, conn
+    return psycopg.connect(dsn, autocommit=False, connect_timeout=10)
 
 
-def open_sftp(host: str, user: str, pwd: str):
-    """Отдельная paramiko-сессия под чтение/удаление файлов сырья."""
+def open_ssh(host: str, user: str, pwd: str):
+    """ОДНА ssh-сессия на процесс. Потоки берут из неё по своему SFTP-каналу —
+    так не плодим логины (серия параллельных авторизаций легко ловит блокировку
+    на сервере), а каналы внутри транспорта работают независимо."""
     import paramiko
 
     cli = paramiko.SSHClient()
@@ -120,7 +133,12 @@ def open_sftp(host: str, user: str, pwd: str):
     tr = cli.get_transport()
     if tr is not None:
         tr.set_keepalive(30)
-    return cli, cli.open_sftp()
+    return cli
+
+
+def sftp_channel(ssh):
+    """Отдельный SFTP-канал (на поток) поверх общего ssh-транспорта."""
+    return ssh.get_transport().open_sftp_client()
 
 
 # ─────────────────────────── работа с очередью ───────────────────────────
@@ -220,16 +238,116 @@ def process_one(conn, sftp, raw_dir: str, aid: int, delete: bool) -> tuple[str, 
     return data.status, f"{data.name or data.status} ({data.status}, {data.total_runs or 0} заб.)"
 
 
+class Shared:
+    """Общее состояние потоков: счётчики, статистика, флаг остановки, замок печати."""
+
+    def __init__(self, limit: int) -> None:
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.limit = limit
+        self.done = 0
+        self.taken = 0            # слотов ЗАНЯТО (не дожидаясь результата)
+        self.counts: dict[str, int] = {}
+
+    def take_slot(self) -> bool:
+        """Атомарно занять место под ещё одного атлета. Считаем именно взятые
+        слоты, а не завершённые: иначе 8 потоков успевают проскочить проверку
+        одновременно и --limit 20 превращается в 27."""
+        with self.lock:
+            if self.limit and self.taken >= self.limit:
+                return False
+            self.taken += 1
+            return True
+
+    def release_slot(self) -> None:
+        """Вернуть слот, если атлет так и не был обработан (пропуск/сбой)."""
+        with self.lock:
+            if self.taken > 0:
+                self.taken -= 1
+
+    def has_room(self) -> bool:
+        """Проверка без занятия слота (перед тем как идти за новой бронью)."""
+        with self.lock:
+            return not self.limit or self.taken < self.limit
+
+    def record(self, status: str) -> int:
+        with self.lock:
+            self.done += 1
+            self.counts[status] = self.counts.get(status, 0) + 1
+            return self.done
+
+    def say(self, msg: str) -> None:
+        with self.lock:
+            print(msg, flush=True)
+
+
+def worker_loop(idx: int, dsn: str, ssh, args, st: Shared) -> None:
+    """Один поток: свой коннект к БД, свой SFTP-канал, свой claim."""
+    name = f"parser:{socket.gethostname()}:{os.getpid()}:t{idx}"
+    try:
+        conn = db_connect(dsn)
+        sftp = sftp_channel(ssh)
+    except Exception as exc:  # noqa: BLE001
+        st.say(f"  поток {idx}: не поднялся ({exc!r})")
+        return
+    try:
+        while not st.stop.is_set():
+            if not st.has_room():
+                break
+            try:
+                ids = claim(conn, name, args.batch)
+            except Exception as exc:  # noqa: BLE001
+                st.say(f"  поток {idx}: сбой брони {exc!r}")
+                break
+            if not ids:
+                if args.once:
+                    break
+                # ждём новых собранных, но остаёмся отзывчивыми к Ctrl+C
+                if st.stop.wait(IDLE_SLEEP):
+                    break
+                continue
+            for aid in ids:
+                if st.stop.is_set() or not st.take_slot():
+                    break
+                t0 = time.time()
+                try:
+                    status, desc = process_one(conn, sftp, args.raw_dir, aid, args.delete)
+                except Exception as exc:  # noqa: BLE001 — одна строка не роняет прогон
+                    try:
+                        conn.rollback()
+                        mark_retry(conn, aid, repr(exc))
+                    except Exception:
+                        pass
+                    st.release_slot()
+                    st.say(f"  атлет {aid}: сбой {exc!r}")
+                    continue
+                if status == "skip":
+                    st.release_slot()
+                    st.say(f"  атлет {aid}: {desc}")
+                    continue
+                n = st.record(status)
+                st.say(f"  #{n} атлет {aid}: {desc} [{time.time()-t0:.2f}с]")
+    finally:
+        for c in (conn, sftp):
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Офлайн-парсер собранных parkrun-страниц")
     ap.add_argument("--limit", type=int, default=0, help="сколько атлетов (0 = без предела)")
     ap.add_argument("--batch", type=int, default=BATCH, help="размер брони за раз")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="сколько страниц обрабатывать параллельно (1 = как раньше)")
     ap.add_argument("--delete", action="store_true",
                     help="удалять файлы сырья после успешной записи (по умолчанию НЕТ)")
     ap.add_argument("--raw-dir", default=os.getenv("PM_RAW_DIR", DEFAULT_RAW_DIR),
                     help="папка сырья на сервере")
     ap.add_argument("--once", action="store_true", help="разобрать что есть и выйти (не ждать)")
     args = ap.parse_args()
+    threads = max(1, args.threads)
 
     host = _cred("PM_SSH_HOST", "TEMP_SSH_HOST", "PROD_SSH_HOST",
                  default="195.58.34.112", prompt="SSH-хост сервера: ")
@@ -240,57 +358,39 @@ def main() -> None:
     if not pwd:
         sys.exit("нет SSH-пароля (PM_SSH_PASS / .env / ввод) — прервано")
 
-    worker = f"parser:{socket.gethostname()}:{os.getpid()}"
-    print(f"[{platform.system()}] парсер {worker}", flush=True)
+    print(f"[{platform.system()}] парсер {socket.gethostname()}:{os.getpid()} · "
+          f"потоков: {threads}", flush=True)
     print(f"подключаюсь к {user}@{host} (БД-туннель + SFTP)…", flush=True)
-    tun, conn = open_db(host, user, pwd)
-    ssh, sftp = open_sftp(host, user, pwd)
+    tun, dsn = open_db(host, user, pwd)
+    ssh = open_ssh(host, user, pwd)
     print(f"на связи · папка {args.raw_dir} · удаление файлов: "
           f"{'да' if args.delete else 'нет'}", flush=True)
 
-    done = 0
-    counts: dict[str, int] = {}
+    st = Shared(args.limit)
+    t0 = time.time()
+    pool = [threading.Thread(target=worker_loop, args=(i + 1, dsn, ssh, args, st),
+                             name=f"parser-{i+1}", daemon=True)
+            for i in range(threads)]
+    for t in pool:
+        t.start()
     try:
-        while True:
-            if args.limit and done >= args.limit:
-                print(f"лимит {args.limit} достигнут.", flush=True)
-                break
-            take = args.batch
-            if args.limit:
-                take = min(take, args.limit - done)
-            ids = claim(conn, worker, take)
-            if not ids:
-                if args.once:
-                    print("собранных строк нет — выхожу (--once).", flush=True)
-                    break
-                print(f"собранных строк нет, жду {IDLE_SLEEP}с…", flush=True)
-                time.sleep(IDLE_SLEEP)
-                continue
-            for aid in ids:
-                t0 = time.time()
-                try:
-                    status, desc = process_one(conn, sftp, args.raw_dir, aid, args.delete)
-                except Exception as exc:  # noqa: BLE001 — не роняем прогон из-за одной строки
-                    conn.rollback()
-                    mark_retry(conn, aid, repr(exc))
-                    print(f"  атлет {aid}: сбой {exc!r}", flush=True)
-                    continue
-                if status == "skip":
-                    print(f"  атлет {aid}: {desc}", flush=True)
-                    continue
-                done += 1
-                counts[status] = counts.get(status, 0) + 1
-                print(f"  #{done} атлет {aid}: {desc} [{time.time()-t0:.2f}с]", flush=True)
+        # join с таймаутом: голый join не пускает KeyboardInterrupt в главный поток
+        while any(t.is_alive() for t in pool):
+            for t in pool:
+                t.join(0.3)
     except KeyboardInterrupt:
-        print("\nостановлено.", flush=True)
+        print("\nостанавливаю потоки…", flush=True)
+        st.stop.set()
+        for t in pool:
+            t.join(10)
     finally:
-        summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "—"
-        print(f"итого распарсено: {done} ({summary})", flush=True)
-        try:
-            conn.close()
-        except Exception:
-            pass
-        for closer in (sftp, ssh, tun):
+        st.stop.set()
+        el = time.time() - t0
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(st.counts.items())) or "—"
+        rate = st.done / el * 60 if el > 0 else 0
+        print(f"итого распарсено: {st.done} ({summary}) за {el:.0f}с "
+              f"≈ {rate:.0f}/мин", flush=True)
+        for closer in (ssh, tun):
             try:
                 closer.close() if hasattr(closer, "close") else closer.stop()
             except Exception:
