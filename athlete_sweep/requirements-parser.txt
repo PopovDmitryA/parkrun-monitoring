@@ -6,3 +6,7 @@ paramiko>=3,<4
 sshtunnel>=0.4
 psycopg[binary]>=3.1
 beautifulsoup4>=4.12
+# httpx тянется транзитивно: file_parser берёт store() из worker.py, а тот
+# импортирует httpx на уровне модуля (нужен ему для фетча, парсеру — нет).
+httpx>=0.27
+
