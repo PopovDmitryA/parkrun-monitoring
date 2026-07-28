@@ -292,6 +292,12 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
     """
     br = p.chromium.launch(headless=True, proxy={"server": proxy})
     ctx = br.new_context(user_agent=ua, viewport={"width": 1280, "height": 900})
+    # Ресурсы намеренно НЕ режем через ctx.route. Пробовали (шрифты/стили/медиа),
+    # чтобы снизить число соединений через тоннель — выигрыша не увидели, а
+    # Playwright при этом гонит каждый запрос через Python-колбэк, что по
+    # медленному каналу подозрительно замедляло заход. Обрыв SSH всё равно
+    # лечится пересозданием тоннеля (ensure_tunnel), а не экономией запросов.
+    # Картинки резать нельзя в принципе: головоломка — это картинки в canvas.
     pg = ctx.new_page()
     token = None
     try:
@@ -349,9 +355,12 @@ def work_fast(args) -> None:
             headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
             cookies={"aws-waf-token": token} if token else {})
 
+    ensure_tunnel = getattr(args, "ensure_tunnel", lambda: True)
     conn = psycopg.connect(args.dsn, autocommit=False, connect_timeout=10)
 
     def db(fn):
+        """Операция с БД. При обрыве сначала чиним ТОННЕЛЬ (он и есть причина —
+        порт 5433 идёт через него), потом переподключаемся и повторяем."""
         nonlocal conn
         try:
             return fn(conn)
@@ -361,13 +370,14 @@ def work_fast(args) -> None:
             except Exception:
                 pass
             for _ in range(12):
+                ensure_tunnel()
                 try:
                     conn = psycopg.connect(args.dsn, autocommit=False, connect_timeout=10)
                     print("    БД: переподключился", flush=True)
-                    break
-                except Exception:
+                    return fn(conn)
+                except psycopg.OperationalError:
                     time.sleep(5)
-            return fn(conn)
+            raise RuntimeError("БД недоступна: тоннель не поднимается больше минуты")
 
     worker = f"waf-fast:{os.getpid()}"
     print("загружаю CLIP…", flush=True)
@@ -428,6 +438,22 @@ def work_fast(args) -> None:
                     print(f"  #{done} атлет {aid}: {data.name or data.status} "
                           f"({data.status}, {data.total_runs or 0} заб.) "
                           f"[{time.time()-t0:.1f}с]", flush=True)
+                except (httpx.TransportError, httpx.HTTPError) as exc:
+                    # Сеть/прокси отвалились — почти всегда это упавший тоннель.
+                    # Чиним его и пересоздаём клиента, атлета возвращаем в очередь.
+                    print(f"  атлет {aid}: сеть — {type(exc).__name__}, проверяю тоннель", flush=True)
+                    ensure_tunnel()
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    client = make_client(token)
+                    err = repr(exc)[:200]
+                    db(lambda c: (c.execute(
+                        "UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
+                        "attempts=attempts+1, error=%s WHERE athlete_id=%s", (err, aid)),
+                        c.commit()))
+                    stats["обрыв сети"] += 1
                 except Exception as exc:
                     err = repr(exc)[:200]
                     db(lambda c: (c.execute(
@@ -613,15 +639,54 @@ def main() -> None:
         if not pwd:
             from getpass import getpass
             pwd = getpass("SSH-пароль сервера: ")
+        # Локальные порты ФИКСИРУЕМ: тоннель может пересоздаваться на ходу, и
+        # адреса прокси/БД не должны при этом меняться.
+        lp_proxy, lp_db = 19859, 15433
+
+        def build():
+            return SSHTunnelForwarder(
+                (host, 22), ssh_username=user, ssh_password=pwd,
+                remote_bind_addresses=[("127.0.0.1", args.exit_port), ("127.0.0.1", 5433)],
+                local_bind_addresses=[("127.0.0.1", lp_proxy), ("127.0.0.1", lp_db)],
+                set_keepalive=15.0)
+
         print(f"поднимаю тоннель к {user}@{host} (выход {args.exit_port} + БД 5433)…", flush=True)
-        tun = SSHTunnelForwarder(
-            (host, 22), ssh_username=user, ssh_password=pwd,
-            remote_bind_addresses=[("127.0.0.1", args.exit_port), ("127.0.0.1", 5433)],
-            set_keepalive=20.0)
+        tun = build()
         tun.start()
-        proxy_port, db_port = tun.local_bind_ports
-        args.proxy = f"http://127.0.0.1:{proxy_port}"
-        args.dsn = f"postgresql://parkrun:parkrun_world_local@127.0.0.1:{db_port}/parkrun_world"
+        args.proxy = f"http://127.0.0.1:{lp_proxy}"
+        args.dsn = f"postgresql://parkrun:parkrun_world_local@127.0.0.1:{lp_db}/parkrun_world"
+
+        def ensure_tunnel() -> bool:
+            """Жив ли тоннель; если SSH-сессия умерла — пересоздать целиком.
+
+            sshtunnel сам сессию НЕ восстанавливает: при обрыве он до бесконечности
+            пишет «SSH session not active», а прокси и БД лежат. Обрыв ловили на
+            браузерном заходе — браузер открывает десятки соединений разом, на
+            каждое заводится свой SSH-канал, и это упирается в MaxSessions у sshd.
+            """
+            nonlocal tun
+            try:
+                if tun.is_active:
+                    return True
+            except Exception:
+                pass
+            print("    тоннель умер — пересоздаю…", flush=True)
+            try:
+                tun.stop()
+            except Exception:
+                pass
+            for attempt in range(10):
+                try:
+                    tun = build()
+                    tun.start()
+                    print("    тоннель поднят заново", flush=True)
+                    return True
+                except Exception as exc:
+                    print(f"    попытка {attempt+1}/10: {exc!r}", flush=True)
+                    time.sleep(10)
+            return False
+
+        args.ensure_tunnel = ensure_tunnel
         print(f"тоннель поднят: выход → {args.proxy}\n", flush=True)
 
     try:
