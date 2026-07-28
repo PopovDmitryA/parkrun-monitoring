@@ -380,9 +380,40 @@ def work_fast(args) -> None:
             raise RuntimeError("БД недоступна: тоннель не поднимается больше минуты")
 
     worker = f"waf-fast:{os.getpid()}"
+
+    # Регистрация на табло /hq: без неё этот воркер работал мимо рейтинга.
+    # Заводим ОТДЕЛЬНУЮ строку, а не пишем в строку самого выхода — иначе
+    # собранное задвоилось бы со счётчиком серверного менеджера того же выхода.
+    exit_label = str(getattr(args, "exit_port", 0) or "?")
+    try:
+        row = db(lambda c: c.execute(
+            "SELECT name FROM sweep_exits WHERE proxy LIKE %s AND account NOT IN ('free','mac')",
+            (f"%:{exit_label}",)).fetchone())
+        if row:
+            exit_label = row[0]
+    except Exception:
+        pass
+    board = f"mac+{exit_label}"
+    db(lambda c: (c.execute(
+        """INSERT INTO sweep_exits (name, proxy, kind, account, enabled, delay_sec,
+                                    worker_heartbeat_at)
+           VALUES (%s, 'mac-waf', 'mac', 'mac', true, %s, now())
+           ON CONFLICT (name) DO UPDATE SET enabled=true, account='mac',
+             delay_sec=EXCLUDED.delay_sec, cooldown_until=NULL, ban_level=0,
+             worker_heartbeat_at=now()""", (board, args.delay)), c.commit()))
+
+    def board_off() -> None:
+        """Снять «работает» с табло на любом выходе из скрипта."""
+        try:
+            db(lambda c: (c.execute(
+                "UPDATE sweep_exits SET worker_heartbeat_at=NULL, enabled=false "
+                "WHERE name=%s", (board,)), c.commit()))
+        except Exception:
+            pass
+
     print("загружаю CLIP…", flush=True)
     clip = Clip()
-    print(f"готово. воркер {worker} · задержка {args.delay}с\n", flush=True)
+    print(f"готово. воркер {worker} · на табло «{board}» · задержка {args.delay}с\n", flush=True)
 
     rn = next_round_no()
     token: str | None = None
@@ -393,7 +424,7 @@ def work_fast(args) -> None:
     t_start = time.time()
     with sync_playwright() as p:
         try:
-            while done < args.limit:
+            while not args.limit or done < args.limit:
                 aid = db(lambda c: claim(c, worker, 60))
                 if aid is None:
                     print("очередь пуста", flush=True)
@@ -430,9 +461,13 @@ def work_fast(args) -> None:
                         if classify(r2.status_code, r2.headers, r2.text) == "ok":
                             data.runs = parse_all_runs(r2.text, str(aid))
                     raw = r.text if data.status == "unclassified" else None
+                    spent = int(time.time() - t0 + args.delay)
                     db(lambda c: (store(c, aid, data, raw), c.execute(
                         "UPDATE crawl_queue SET status=%s, claimed_by=NULL, fetched_at=now() "
-                        "WHERE athlete_id=%s", (data.status, aid)), c.commit()))
+                        "WHERE athlete_id=%s", (data.status, aid)), c.execute(
+                        "UPDATE sweep_exits SET collected_total=collected_total+1, "
+                        "active_seconds=active_seconds+%s, last_ok_at=now(), "
+                        "worker_heartbeat_at=now() WHERE name=%s", (spent, board)), c.commit()))
                     done += 1
                     stats[data.status] += 1
                     print(f"  #{done} атлет {aid}: {data.name or data.status} "
@@ -466,6 +501,7 @@ def work_fast(args) -> None:
         except KeyboardInterrupt:
             print("\nостановлено.", flush=True)
         finally:
+            board_off()
             try:
                 client.close(); conn.close()
             except Exception:
@@ -540,7 +576,7 @@ def work_mode(args) -> None:
             viewport={"width": 1280, "height": 900})
         pg = ctx.new_page()
         try:
-            while done < args.limit:
+            while not args.limit or done < args.limit:
                 aid = db.run(lambda c: claim(c, worker, 60))
                 if aid is None:
                     print("очередь пуста", flush=True)
@@ -617,7 +653,8 @@ def main() -> None:
                     help="сколько головоломок подряд решать в одном заходе")
     ap.add_argument("--work", action="store_true",
                     help="РАБОЧИЙ режим: качать реальных атлетов из очереди и писать в БД")
-    ap.add_argument("--limit", type=int, default=100, help="сколько атлетов в рабочем режиме")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="сколько атлетов в рабочем режиме (0 = без предела)")
     ap.add_argument("--delay", type=float, default=2.0, help="пауза между атлетами, сек")
     ap.add_argument("--dsn", default="postgresql://parkrun:parkrun_world_local@127.0.0.1:5433/parkrun_world",
                     help="DSN pm-postgres (через SSH-проброс порта 5433)")
@@ -639,9 +676,19 @@ def main() -> None:
         if not pwd:
             from getpass import getpass
             pwd = getpass("SSH-пароль сервера: ")
-        # Локальные порты ФИКСИРУЕМ: тоннель может пересоздаваться на ходу, и
-        # адреса прокси/БД не должны при этом меняться.
-        lp_proxy, lp_db = 19859, 15433
+        # Порты выбираем СВОБОДНЫЕ, но один раз и запоминаем: тоннель может
+        # пересоздаваться на ходу, и адреса прокси/БД при этом меняться не должны.
+        # Жёстко зашитые номера не годятся — мешают запустить несколько выходов
+        # параллельно и ломают старт, если прошлый прогон ещё держит порт.
+        def _free_port() -> int:
+            import socket
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+            s.close()
+            return port
+
+        lp_proxy, lp_db = _free_port(), _free_port()
 
         def build():
             return SSHTunnelForwarder(
