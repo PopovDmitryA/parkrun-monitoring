@@ -105,12 +105,28 @@ py -m athlete_sweep.file_parser --delete --threads 8
 
 ## Дополнительные зависимости (один раз)
 
+Ставить **по одной команде**, по порядку:
+
 ```cmd
-py -m pip install torch open_clip_torch playwright
+py -m pip install --upgrade pip
+py -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+py -m pip install open_clip_torch playwright
 py -m playwright install chromium
 ```
 
-Тяжёлые (~2 ГБ): это модель, которая распознаёт картинки в капче.
+**Почему отдельный index-url для torch:** без него pip тянет сборку под видеокарту
+(CUDA) — это ~2.5 ГБ, и на машине без нужных драйверов установка часто падает.
+CPU-сборка весит ~200 МБ и нам её достаточно: модель маленькая, работает быстрее
+секунды на девяти картинках.
+
+Проверить, что встало:
+
+```cmd
+py -c "import torch, open_clip; print('torch', torch.__version__, 'OK')"
+```
+
+При ПЕРВОМ запуске решателя докачается сама модель (~350 МБ) — один раз, дальше
+берётся из кеша.
 
 ## Запуск
 

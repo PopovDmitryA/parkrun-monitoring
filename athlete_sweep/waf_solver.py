@@ -79,8 +79,18 @@ class Clip:
     """Обёртка над CLIP: отвечает, к какой категории ближе картинка."""
 
     def __init__(self) -> None:
-        import open_clip
-        import torch
+        try:
+            import open_clip
+            import torch
+        except ImportError as exc:
+            raise SystemExit(
+                f"\n!! Не установлена модель распознавания капчи ({exc.name}).\n"
+                "   Ставить так (torch — ОБЯЗАТЕЛЬНО с cpu-индексом, иначе pip\n"
+                "   потянет 2.5 ГБ сборки под видеокарту и часто падает):\n\n"
+                "     py -m pip install torch --index-url https://download.pytorch.org/whl/cpu\n"
+                "     py -m pip install open_clip_torch playwright\n"
+                "     py -m playwright install chromium\n"
+            ) from exc
 
         self.torch = torch
         self.model, _, self.pre = open_clip.create_model_and_transforms(
