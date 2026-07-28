@@ -718,7 +718,19 @@ def main() -> None:
         what = f"выход {args.exit_port} + БД" if args.exit_port else "только БД"
         print(f"поднимаю тоннель к {user}@{host} ({what})…", flush=True)
         tun = build()
-        tun.start()
+        try:
+            tun.start()
+        except Exception as exc:
+            # Голый трейсбэк sshtunnel ничего не объясняет — подсказываем, что смотреть.
+            print("\n!! Не удалось подключиться к серверу по SSH.", flush=True)
+            print(f"   {type(exc).__name__}: {str(exc)[:160]}\n", flush=True)
+            print("   Проверь по порядку:", flush=True)
+            print(f"   1) Доступен ли порт: PowerShell → Test-NetConnection {host} -Port 22", flush=True)
+            print(f"      (или просто: ssh {user}@{host} — в Windows 10+ ssh встроен)", flush=True)
+            print("   2) Пароль. При вводе он не отображается, опечатку не видно.", flush=True)
+            print("      Надёжнее задать заранее:  set PM_SSH_PASS=пароль", flush=True)
+            print("   3) Не режет ли исходящий 22-й порт сеть/провайдер/антивирус.", flush=True)
+            raise SystemExit(1)
         args.proxy = f"http://127.0.0.1:{lp_proxy}" if args.exit_port else ""
         args.dsn = f"postgresql://parkrun:parkrun_world_local@127.0.0.1:{lp_db}/parkrun_world"
 
