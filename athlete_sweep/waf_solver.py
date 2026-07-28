@@ -43,6 +43,9 @@ CATEGORIES = [
 PROMPT = "a photo of a {}"
 # Замерено на живых показах: правильных плиток всегда 5 из 9.
 EXPECTED_PICKS = 5
+# Сбор плиток в data/waf_captcha выключен: библиотека AWS оказалась в десятки
+# тысяч снимков, накопление смысла не имеет (решаем классификатором, не базой).
+SAVE_TILES = os.getenv("PM_WAF_SAVE_TILES", "") == "1"
 
 JS_TILES = r"""
 () => {
@@ -119,6 +122,28 @@ class Clip:
         return [float(row[j]) for row in self._probs(images)]
 
 
+def _cred_env(env_key: str, *file_keys: str, default: str = "") -> str:
+    """Креды: сначала переменная окружения, потом .env рядом и в saturday_runs_stats."""
+    v = os.getenv(env_key, "")
+    if v:
+        return v
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = os.path.expanduser("~")
+    for path in (os.path.join(root, ".env"),
+                 os.path.join(home, "Projects", "saturday_runs_stats", ".env")):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    for k in file_keys:
+                        if line.startswith(k + "="):
+                            return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            continue
+    return default
+
+
 def singular(word: str) -> str:
     w = word.lower().rstrip()
     for plural, single in (("ies", "y"), ("ses", "s"), ("s", "")):
@@ -134,6 +159,8 @@ def save_tiles(round_no: int, cat: str, raws: list[bytes]) -> int:
     import imagehash
     from PIL import Image
 
+    if not SAVE_TILES:
+        return 0
     os.makedirs(f"{DATA}/library", exist_ok=True)
     d = f"{DATA}/rounds/{round_no:03d}_{cat}"
     os.makedirs(d, exist_ok=True)
@@ -255,6 +282,174 @@ def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 4) -> tuple[bool, i
             continue
         return False, solved, rn
     return False, solved, rn
+
+
+def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | None, int]:
+    """Поднять браузер, пройти капчу, снять aws-waf-token и закрыться.
+
+    Картинки НЕ блокируем: головоломка — это и есть картинки в canvas.
+    UA тот же, что у httpx: WAF привязывает токен в том числе к нему.
+    """
+    br = p.chromium.launch(headless=True, proxy={"server": proxy})
+    ctx = br.new_context(user_agent=ua, viewport={"width": 1280, "height": 900})
+    pg = ctx.new_page()
+    token = None
+    try:
+        pg.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(4)
+        html = pg.content()
+        if "Human Verification" in html or "Choose all" in html:
+            ok, _n, rn = pass_captcha(pg, clip, rn)
+            if not ok:
+                return None, rn
+        for c in ctx.cookies():
+            if c["name"] == "aws-waf-token":
+                token = c["value"]
+                break
+    except Exception as exc:
+        print(f"    добыча токена не удалась: {exc!r}", flush=True)
+    finally:
+        try:
+            ctx.close(); br.close()
+        except Exception:
+            pass
+    return token, rn
+
+
+def work_fast(args) -> None:
+    """БЫСТРЫЙ режим: страницы качает httpx (только HTML, без картинок и скриптов),
+    браузер поднимается ТОЛЬКО когда прилетела капча — пройти её и отдать токен.
+
+    Так на атлета уходит 1-2с вместо 8-9с у полностью браузерного прохода, а
+    браузер включается примерно раз в 25 атлетов.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import httpx
+    import psycopg
+    from playwright.sync_api import sync_playwright
+
+    from athlete_sweep.parse import AthleteData, parse_all_runs, parse_summary
+    from athlete_sweep.worker import UA, WAF_MARKERS, claim, store
+
+    def classify(status_code: int, headers, body: str) -> str:
+        low = body[:2000].lower()
+        if "x-amzn-waf-action" in {k.lower() for k in headers}:
+            return "protected"
+        if status_code in (403, 405) or any(m in low for m in WAF_MARKERS):
+            return "protected"
+        if status_code == 404:
+            return "not_found"
+        return "ok"
+
+    def make_client(token: str | None) -> httpx.Client:
+        return httpx.Client(
+            proxy=args.proxy, timeout=25.0, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
+            cookies={"aws-waf-token": token} if token else {})
+
+    conn = psycopg.connect(args.dsn, autocommit=False, connect_timeout=10)
+
+    def db(fn):
+        nonlocal conn
+        try:
+            return fn(conn)
+        except psycopg.OperationalError:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            for _ in range(12):
+                try:
+                    conn = psycopg.connect(args.dsn, autocommit=False, connect_timeout=10)
+                    print("    БД: переподключился", flush=True)
+                    break
+                except Exception:
+                    time.sleep(5)
+            return fn(conn)
+
+    worker = f"waf-fast:{os.getpid()}"
+    print("загружаю CLIP…", flush=True)
+    clip = Clip()
+    print(f"готово. воркер {worker} · задержка {args.delay}с\n", flush=True)
+
+    rn = next_round_no()
+    token: str | None = None
+    client = make_client(token)
+    done = 0
+    captchas = 0
+    stats = Counter()
+    t_start = time.time()
+    with sync_playwright() as p:
+        try:
+            while done < args.limit:
+                aid = db(lambda c: claim(c, worker, 60))
+                if aid is None:
+                    print("очередь пуста", flush=True)
+                    break
+                base = f"https://www.parkrun.org.uk/parkrunner/{aid}/"
+                t0 = time.time()
+                try:
+                    r = client.get(base)
+                    kind = classify(r.status_code, r.headers, r.text)
+                    if kind == "protected":
+                        captchas += 1
+                        print(f"  капча на {aid} — поднимаю браузер за токеном…", flush=True)
+                        token, rn = harvest_token(p, args.proxy, clip, rn, UA)
+                        if not token:
+                            db(lambda c: (c.execute(
+                                "UPDATE crawl_queue SET status='pending', claimed_by=NULL "
+                                "WHERE athlete_id=%s", (aid,)), c.commit()))
+                            stats["токен не добыт"] += 1
+                            continue
+                        stats["капча решена"] += 1
+                        client.close(); client = make_client(token)
+                        r = client.get(base)
+                        kind = classify(r.status_code, r.headers, r.text)
+                        if kind == "protected":
+                            db(lambda c: (c.execute(
+                                "UPDATE crawl_queue SET status='pending', claimed_by=NULL "
+                                "WHERE athlete_id=%s", (aid,)), c.commit()))
+                            stats["токен не помог"] += 1
+                            continue
+                    data = (AthleteData(status="not_found") if kind == "not_found"
+                            else parse_summary(r.text, str(aid)))
+                    if data.status == "ok":
+                        r2 = client.get(base + "all/")
+                        if classify(r2.status_code, r2.headers, r2.text) == "ok":
+                            data.runs = parse_all_runs(r2.text, str(aid))
+                    raw = r.text if data.status == "unclassified" else None
+                    db(lambda c: (store(c, aid, data, raw), c.execute(
+                        "UPDATE crawl_queue SET status=%s, claimed_by=NULL, fetched_at=now() "
+                        "WHERE athlete_id=%s", (data.status, aid)), c.commit()))
+                    done += 1
+                    stats[data.status] += 1
+                    print(f"  #{done} атлет {aid}: {data.name or data.status} "
+                          f"({data.status}, {data.total_runs or 0} заб.) "
+                          f"[{time.time()-t0:.1f}с]", flush=True)
+                except Exception as exc:
+                    err = repr(exc)[:200]
+                    db(lambda c: (c.execute(
+                        "UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
+                        "attempts=attempts+1, error=%s WHERE athlete_id=%s", (err, aid)),
+                        c.commit()))
+                    stats["сбой"] += 1
+                    print(f"  атлет {aid}: сбой {exc!r}", flush=True)
+                time.sleep(args.delay)
+        except KeyboardInterrupt:
+            print("\nостановлено.", flush=True)
+        finally:
+            try:
+                client.close(); conn.close()
+            except Exception:
+                pass
+    el = time.time() - t_start
+    print("\n" + "=" * 46)
+    print(f"АТЛЕТОВ записано: {done} за {el/60:.1f} мин "
+          f"({el/max(done,1):.1f}с на атлета, ~{done/max(el,1)*3600:.0f}/час)")
+    print(f"капч: {captchas}" + (f" (1 на {done/captchas:.0f} атлетов)" if captchas else ""))
+    print("разбивка:", dict(stats))
 
 
 def work_mode(args) -> None:
@@ -400,10 +595,48 @@ def main() -> None:
     ap.add_argument("--delay", type=float, default=2.0, help="пауза между атлетами, сек")
     ap.add_argument("--dsn", default="postgresql://parkrun:parkrun_world_local@127.0.0.1:5433/parkrun_world",
                     help="DSN pm-postgres (через SSH-проброс порта 5433)")
+    ap.add_argument("--fast", action="store_true",
+                    help="БЫСТРЫЙ режим: httpx качает страницы, браузер только на капчу")
+    ap.add_argument("--exit-port", type=int, default=0,
+                    help="порт выхода xray на сервере (напр. 10859=de2); включает авто-тоннель")
     args = ap.parse_args()
-    if args.work:
-        work_mode(args)
-        return
+
+    tun = None
+    if args.exit_port:
+        # Сами поднимаем SSH-тоннель сразу к ДВУМ портам: выход xray и pm-postgres.
+        # Так скрипт запускается одной командой, без ручного ssh -L в соседнем окне.
+        from sshtunnel import SSHTunnelForwarder
+
+        host = _cred_env("PM_SSH_HOST", "TEMP_SSH_HOST", "PROD_SSH_HOST", default="195.58.34.112")
+        user = _cred_env("PM_SSH_USER", "TEMP_SSH_USER", "PROD_SSH_USER", default="viewer")
+        pwd = _cred_env("PM_SSH_PASS", "TEMP_SSH_PASSWORD")
+        if not pwd:
+            from getpass import getpass
+            pwd = getpass("SSH-пароль сервера: ")
+        print(f"поднимаю тоннель к {user}@{host} (выход {args.exit_port} + БД 5433)…", flush=True)
+        tun = SSHTunnelForwarder(
+            (host, 22), ssh_username=user, ssh_password=pwd,
+            remote_bind_addresses=[("127.0.0.1", args.exit_port), ("127.0.0.1", 5433)],
+            set_keepalive=20.0)
+        tun.start()
+        proxy_port, db_port = tun.local_bind_ports
+        args.proxy = f"http://127.0.0.1:{proxy_port}"
+        args.dsn = f"postgresql://parkrun:parkrun_world_local@127.0.0.1:{db_port}/parkrun_world"
+        print(f"тоннель поднят: выход → {args.proxy}\n", flush=True)
+
+    try:
+        if args.fast:
+            work_fast(args)
+            return
+        if args.work:
+            work_mode(args)
+            return
+    finally:
+        if tun is not None:
+            try:
+                tun.stop()
+            except Exception:
+                pass
 
     from playwright.sync_api import sync_playwright
 
