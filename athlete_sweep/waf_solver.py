@@ -223,9 +223,169 @@ def solve_once(pg, clip: Clip, round_no: int, verbose: bool = True) -> dict:
             continue
     time.sleep(5)
     body = pg.content()
-    info["solved"] = BARCODE in body
+    # Успех = капчи на странице БОЛЬШЕ НЕТ. Раньше проверяли по штрихкоду (A620),
+    # но в рабочем режиме качаются другие атлеты — у них штрихкод свой, и условие
+    # не выполнялось никогда: решённые капчи считались проваленными.
     info["another_puzzle"] = "Choose all" in body
+    info["solved"] = not info["another_puzzle"] and "Human Verification" not in body
     return info
+
+
+def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 4) -> tuple[bool, int, int]:
+    """Провести страницу через капчу. Возвращает (прошли, решено_головоломок, rn)."""
+    for sel in ["button:has-text('Begin')", "text=Begin"]:
+        try:
+            el = pg.locator(sel).first
+            if el.count() and el.is_visible():
+                el.click(timeout=5000)
+                break
+        except Exception:
+            continue
+    time.sleep(6)
+    solved = 0
+    for _ in range(max_puzzles):
+        r = solve_once(pg, clip, rn); rn += 1
+        if r.get("error"):
+            return False, solved, rn
+        solved += 1
+        if r.get("solved"):
+            return True, solved, rn
+        if r.get("another_puzzle"):
+            time.sleep(3)
+            continue
+        return False, solved, rn
+    return False, solved, rn
+
+
+def work_mode(args) -> None:
+    """Полезный режим: берём атлетов из очереди, качаем через выход, при капче
+    решаем её сами, парсим и пишем в БД. Токен живёт в контексте браузера, поэтому
+    после одной решённой капчи подряд идёт много атлетов без единой новой."""
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import psycopg
+    from playwright.sync_api import sync_playwright
+
+    from athlete_sweep.parse import AthleteData, parse_all_runs, parse_summary
+    from athlete_sweep.worker import claim, store
+
+    dsn = args.dsn
+
+    class Db:
+        """Коннект с переподключением: SSH-тоннель к pm-postgres периодически
+        рвётся и утаскивает соединение за собой — это не повод падать."""
+
+        def __init__(self) -> None:
+            self.conn = psycopg.connect(dsn, autocommit=False, connect_timeout=10)
+
+        def reconnect(self) -> None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            for attempt in range(12):
+                try:
+                    self.conn = psycopg.connect(dsn, autocommit=False, connect_timeout=10)
+                    print("    БД: переподключился", flush=True)
+                    return
+                except Exception:
+                    time.sleep(5)
+            raise RuntimeError("БД недоступна больше минуты")
+
+        def run(self, fn):
+            """Выполнить операцию, при обрыве — переподключиться и повторить раз."""
+            try:
+                return fn(self.conn)
+            except psycopg.OperationalError:
+                self.reconnect()
+                return fn(self.conn)
+
+    db = Db()
+    worker = f"waf-browser:{os.getpid()}"
+    print("загружаю CLIP…", flush=True)
+    clip = Clip()
+    print(f"готово. воркер {worker}\n", flush=True)
+
+    rn = next_round_no()
+    done = 0
+    captchas = 0
+    stats = Counter()
+    with sync_playwright() as p:
+        br = p.chromium.launch(headless=True, proxy={"server": args.proxy})
+        ctx = br.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            viewport={"width": 1280, "height": 900})
+        pg = ctx.new_page()
+        try:
+            while done < args.limit:
+                aid = db.run(lambda c: claim(c, worker, 60))
+                if aid is None:
+                    print("очередь пуста", flush=True)
+                    break
+                base = f"https://www.parkrun.org.uk/parkrunner/{aid}/"
+                t0 = time.time()
+                try:
+                    pg.goto(base, wait_until="domcontentloaded", timeout=60000)
+                    time.sleep(3)
+                    html = pg.content()
+                    if "Human Verification" in html or "Choose all" in html:
+                        captchas += 1
+                        ok, n, rn = pass_captcha(pg, clip, rn, args.max_puzzles)
+                        stats["капча решена" if ok else "капча НЕ решена"] += 1
+                        if not ok:
+                            db.run(lambda c: (c.execute(
+                                "UPDATE crawl_queue SET status='pending', claimed_by=NULL "
+                                "WHERE athlete_id=%s", (aid,)), c.commit()))
+                            print(f"  атлет {aid}: капчу не прошли — вернул в очередь", flush=True)
+                            continue
+                        pg.goto(base, wait_until="domcontentloaded", timeout=60000)
+                        time.sleep(2)
+                        html = pg.content()
+                    data = parse_summary(html, str(aid))
+                    if data.status == "ok":
+                        pg.goto(base + "all/", wait_until="domcontentloaded", timeout=60000)
+                        time.sleep(2)
+                        h2 = pg.content()
+                        if "Choose all" not in h2 and "Human Verification" not in h2:
+                            data.runs = parse_all_runs(h2, str(aid))
+                    raw = html if data.status == "unclassified" else None
+                    db.run(lambda c: (store(c, aid, data, raw), c.execute(
+                        "UPDATE crawl_queue SET status=%s, claimed_by=NULL, fetched_at=now() "
+                        "WHERE athlete_id=%s", (data.status, aid)), c.commit()))
+                    done += 1
+                    stats[data.status] += 1
+                    print(f"  #{done} атлет {aid}: {data.name or data.status} "
+                          f"({data.status}, {data.total_runs or 0} заб.) "
+                          f"[{time.time()-t0:.1f}с]", flush=True)
+                except Exception as exc:
+                    try:
+                        db.conn.rollback()
+                    except Exception:
+                        pass
+                    err = repr(exc)[:200]
+                    db.run(lambda c: (c.execute(
+                        "UPDATE crawl_queue SET status='pending', claimed_by=NULL, "
+                        "attempts=attempts+1, error=%s WHERE athlete_id=%s", (err, aid)), c.commit()))
+                    print(f"  атлет {aid}: сбой {exc!r}", flush=True)
+                    stats["сбой"] += 1
+                time.sleep(args.delay)
+        except KeyboardInterrupt:
+            print("\nостановлено.", flush=True)
+        finally:
+            ctx.close(); br.close()
+            try:
+                db.conn.close()
+            except Exception:
+                pass
+
+    lib = len(os.listdir(f"{DATA}/library")) if os.path.isdir(f"{DATA}/library") else 0
+    print("\n" + "=" * 46)
+    print(f"АТЛЕТОВ записано в БД: {done}")
+    print(f"капч встретилось: {captchas}")
+    print("разбивка:", dict(stats))
+    print(f"библиотека картинок: {lib}")
 
 
 def main() -> None:
@@ -234,7 +394,16 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=10)
     ap.add_argument("--max-puzzles", type=int, default=4,
                     help="сколько головоломок подряд решать в одном заходе")
+    ap.add_argument("--work", action="store_true",
+                    help="РАБОЧИЙ режим: качать реальных атлетов из очереди и писать в БД")
+    ap.add_argument("--limit", type=int, default=100, help="сколько атлетов в рабочем режиме")
+    ap.add_argument("--delay", type=float, default=2.0, help="пауза между атлетами, сек")
+    ap.add_argument("--dsn", default="postgresql://parkrun:parkrun_world_local@127.0.0.1:5433/parkrun_world",
+                    help="DSN pm-postgres (через SSH-проброс порта 5433)")
     args = ap.parse_args()
+    if args.work:
+        work_mode(args)
+        return
 
     from playwright.sync_api import sync_playwright
 
