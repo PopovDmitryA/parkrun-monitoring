@@ -290,7 +290,8 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
     Картинки НЕ блокируем: головоломка — это и есть картинки в canvas.
     UA тот же, что у httpx: WAF привязывает токен в том числе к нему.
     """
-    br = p.chromium.launch(headless=True, proxy={"server": proxy})
+    br = p.chromium.launch(headless=True,
+                           **({"proxy": {"server": proxy}} if proxy else {}))
     ctx = br.new_context(user_agent=ua, viewport={"width": 1280, "height": 900})
     # Ресурсы намеренно НЕ режем через ctx.route. Пробовали (шрифты/стили/медиа),
     # чтобы снизить число соединений через тоннель — выигрыша не увидели, а
@@ -350,8 +351,10 @@ def work_fast(args) -> None:
         return "ok"
 
     def make_client(token: str | None) -> httpx.Client:
+        # proxy=None → идём НАПРЯМУЮ каналом этой машины (свой IP/VPN).
+        # Так быстрее: не гоняем трафик через SSH-тоннель к выходу сервера.
         return httpx.Client(
-            proxy=args.proxy, timeout=25.0, follow_redirects=True,
+            proxy=(args.proxy or None), timeout=25.0, follow_redirects=True,
             headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
             cookies={"aws-waf-token": token} if token else {})
 
@@ -384,7 +387,7 @@ def work_fast(args) -> None:
     # Регистрация на табло /hq: без неё этот воркер работал мимо рейтинга.
     # Заводим ОТДЕЛЬНУЮ строку, а не пишем в строку самого выхода — иначе
     # собранное задвоилось бы со счётчиком серверного менеджера того же выхода.
-    exit_label = str(getattr(args, "exit_port", 0) or "?")
+    exit_label = str(getattr(args, "exit_port", 0) or "direct")
     try:
         row = db(lambda c: c.execute(
             "SELECT name FROM sweep_exits WHERE proxy LIKE %s AND account NOT IN ('free','mac')",
@@ -393,7 +396,9 @@ def work_fast(args) -> None:
             exit_label = row[0]
     except Exception:
         pass
-    board = f"mac+{exit_label}"
+    import socket as _sock
+    board = (f"{_sock.gethostname().split('.')[0]}-direct" if exit_label == "direct"
+             else f"mac+{exit_label}")
     db(lambda c: (c.execute(
         """INSERT INTO sweep_exits (name, proxy, kind, account, enabled, delay_sec,
                                     worker_heartbeat_at)
@@ -436,6 +441,9 @@ def work_fast(args) -> None:
                     kind = classify(r.status_code, r.headers, r.text)
                     if kind == "protected":
                         captchas += 1
+                        db(lambda c: (c.execute(
+                            "UPDATE sweep_exits SET captcha_total=captcha_total+1, "
+                            "last_captcha_at=now() WHERE name=%s", (board,)), c.commit()))
                         print(f"  капча на {aid} — поднимаю браузер за токеном…", flush=True)
                         token, rn = harvest_token(p, args.proxy, clip, rn, UA)
                         if not token:
@@ -445,6 +453,9 @@ def work_fast(args) -> None:
                             stats["токен не добыт"] += 1
                             continue
                         stats["капча решена"] += 1
+                        db(lambda c: (c.execute(
+                            "UPDATE sweep_exits SET captcha_solved=captcha_solved+1 "
+                            "WHERE name=%s", (board,)), c.commit()))
                         client.close(); client = make_client(token)
                         r = client.get(base)
                         kind = classify(r.status_code, r.headers, r.text)
@@ -665,7 +676,10 @@ def main() -> None:
     args = ap.parse_args()
 
     tun = None
-    if args.exit_port:
+    # Тоннель нужен всегда (БД на сервере), а вот порт выхода — только если
+    # ходим через сервер. Без --exit-port качаем СВОИМ каналом: быстрее, и
+    # тоннель тогда всего один — к базе.
+    if args.exit_port or args.fast or args.work:
         # Сами поднимаем SSH-тоннель сразу к ДВУМ портам: выход xray и pm-postgres.
         # Так скрипт запускается одной командой, без ручного ssh -L в соседнем окне.
         from sshtunnel import SSHTunnelForwarder
@@ -690,17 +704,22 @@ def main() -> None:
 
         lp_proxy, lp_db = _free_port(), _free_port()
 
+        remote = ([("127.0.0.1", args.exit_port), ("127.0.0.1", 5433)] if args.exit_port
+                  else [("127.0.0.1", 5433)])
+        local = ([("127.0.0.1", lp_proxy), ("127.0.0.1", lp_db)] if args.exit_port
+                 else [("127.0.0.1", lp_db)])
+
         def build():
             return SSHTunnelForwarder(
                 (host, 22), ssh_username=user, ssh_password=pwd,
-                remote_bind_addresses=[("127.0.0.1", args.exit_port), ("127.0.0.1", 5433)],
-                local_bind_addresses=[("127.0.0.1", lp_proxy), ("127.0.0.1", lp_db)],
+                remote_bind_addresses=remote, local_bind_addresses=local,
                 set_keepalive=15.0)
 
-        print(f"поднимаю тоннель к {user}@{host} (выход {args.exit_port} + БД 5433)…", flush=True)
+        what = f"выход {args.exit_port} + БД" if args.exit_port else "только БД"
+        print(f"поднимаю тоннель к {user}@{host} ({what})…", flush=True)
         tun = build()
         tun.start()
-        args.proxy = f"http://127.0.0.1:{lp_proxy}"
+        args.proxy = f"http://127.0.0.1:{lp_proxy}" if args.exit_port else ""
         args.dsn = f"postgresql://parkrun:parkrun_world_local@127.0.0.1:{lp_db}/parkrun_world"
 
         def ensure_tunnel() -> bool:
@@ -734,7 +753,9 @@ def main() -> None:
             return False
 
         args.ensure_tunnel = ensure_tunnel
-        print(f"тоннель поднят: выход → {args.proxy}\n", flush=True)
+        print("тоннель поднят: " + (f"выход → {args.proxy}" if args.proxy
+                                    else "запросы идут СВОИМ каналом (без прокси)") + "\n",
+              flush=True)
 
     try:
         if args.fast:

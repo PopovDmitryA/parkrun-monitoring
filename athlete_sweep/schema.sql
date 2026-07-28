@@ -81,3 +81,9 @@ CREATE TABLE IF NOT EXISTS sweep_exits (
     last_tuned_at  TIMESTAMPTZ,
     enabled        BOOLEAN NOT NULL DEFAULT TRUE
 );
+
+-- Статистика капч по воркеру (добавлено 28.07.2026, для табло /hq).
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS captcha_total INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS captcha_solved INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS last_captcha_at TIMESTAMPTZ;
+
