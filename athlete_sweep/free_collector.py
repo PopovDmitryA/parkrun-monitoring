@@ -137,6 +137,7 @@ VALIDATE_CONC = int(os.getenv("PM_FREE_VALIDATE_CONC", "50"))
 VALIDATE_BATCH = int(os.getenv("PM_FREE_VALIDATE_BATCH", "2000"))  # parkrun-проверка TCP-живых
 _cand_offset = 0
 MAX_CONSEC_ERR = 3                                        # ошибок/капч подряд = отлёжка
+NET_COOLDOWN = int(os.getenv("PM_FREE_NET_COOLDOWN", "300"))  # пауза за СЕТЕВОЙ сбой (не бан)
 # Эскалирующая отлёжка. Ранние ступени короткие (разовый сбой — прокси эфемерны,
 # пусть быстро возвращаются): 1м,3м,7м,15м,30м,1ч. Дальше — длинный хвост до недели,
 # чтобы ХРОНИЧЕСКИ дохлые (ban_level рос до 30+, а лесенка капалась на 1ч и они
@@ -342,6 +343,25 @@ async def _record_ban(pool: AsyncConnectionPool, proxy: str) -> None:
         await conn.commit()
 
 
+async def _record_net_fail(pool: AsyncConnectionPool, proxy: str) -> None:
+    """Прокси отвалился ПО СЕТИ (таймаут, обрыв, 503) — это не бан от parkrun.
+
+    Раньше такие сбои шли по той же лесенке, что и капча, и уводили прокси в
+    отлёжку до недели. Замер 28.07.2026: 88% отказов — сетевые, 11% — капча,
+    а из 120 запаркованных 95% просто мертвы. То есть лесенка наказывала за
+    смертность бесплатных прокси, а не за бан, и выкашивала пул.
+
+    Теперь: короткая пауза NET_COOLDOWN и ban_level НЕ растёт — прокси быстро
+    вернётся в ротацию, если это было разовое моргание. Если он мёртв совсем,
+    то просто не пройдёт валидацию и уйдёт сам.
+    """
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE free_proxies SET cooldown_until=now() + (%s || ' seconds')::interval, "
+            "last_fail_at=now() WHERE proxy=%s", (NET_COOLDOWN, proxy))
+        await conn.commit()
+
+
 async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[int]") -> None:
     """FETCH-ONLY: берёт ID из очереди оркестратора → качает 2 страницы →
     gzip в папку → status='collected'. НИКАКОГО парсинга (он на отдельном ПК)."""
@@ -392,13 +412,15 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
                     if consec >= MAX_CONSEC_ERR:
                         await _record_ban(pool, proxy); return
                 except Exception as exc:
+                    # Сетевой сбой — НЕ бан: короткая пауза, лесенка не растёт.
                     await _requeue(pool, aid, repr(exc)[:200])
                     consec += 1
                     if consec >= MAX_CONSEC_ERR:
-                        await _record_ban(pool, proxy); return
+                        await _record_net_fail(pool, proxy); return
                 await asyncio.sleep(delay * random.uniform(0.85, 1.15))
     except Exception:
-        await _record_ban(pool, proxy)
+        # Клиент не поднялся / соединение сдохло целиком — тоже сеть, не бан.
+        await _record_net_fail(pool, proxy)
 
 
 class _Protected(Exception):
