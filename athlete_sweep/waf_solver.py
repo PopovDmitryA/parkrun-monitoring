@@ -154,6 +154,14 @@ def _cred_env(env_key: str, *file_keys: str, default: str = "") -> str:
     return default
 
 
+def proxy_label(pxy: str) -> str:
+    """Короткая метка прокси для табло: из net-212-119-47-225.mcccx.com → 212.119.47.225,
+    иначе — просто хост."""
+    host = pxy.split("://")[-1].split("@")[-1].split(":")[0]
+    m = re.search(r"(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})", host)
+    return ".".join(m.groups()) if m else host
+
+
 def singular(word: str) -> str:
     w = word.lower().rstrip()
     for plural, single in (("ies", "y"), ("ses", "s"), ("s", "")):
@@ -433,8 +441,14 @@ def work_fast(args) -> None:
     except Exception:
         pass
     import socket as _sock
-    board = (f"{_sock.gethostname().split('.')[0]}-direct" if exit_label == "direct"
-             else f"mac+{exit_label}")
+    hostshort = _sock.gethostname().split('.')[0]
+    if getattr(args, "exit_port", 0):
+        board = f"mac+{exit_label}"
+    elif args.proxy and "127.0.0.1" not in args.proxy:
+        # через платный прокси — метка по его IP, чтобы 5-6 терминалов не смешивались
+        board = f"{hostshort}-{proxy_label(args.proxy)}"
+    else:
+        board = f"{hostshort}-direct"
     db(lambda c: (c.execute(
         """INSERT INTO sweep_exits (name, proxy, kind, account, enabled, delay_sec,
                                     worker_heartbeat_at)
@@ -694,7 +708,18 @@ def work_mode(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Свой решатель капчи AWS WAF")
-    ap.add_argument("proxy", help="прокси выхода, напр. http://127.0.0.1:10859")
+    ap.add_argument("proxy", nargs="?", default="",
+                    help="(устар.) позиционный прокси; используй --proxy / --proxy-file")
+    ap.add_argument("--proxy", dest="proxy_opt", default="",
+                    help="внешний прокси для запросов, напр. https://host:8444 "
+                         "или https://user:pass@host:port")
+    ap.add_argument("--proxy-file", default="",
+                    help="файл со списком прокси (по одному в строке); при запуске "
+                         "спросит, каким пользоваться")
+    ap.add_argument("--proxy-index", type=int, default=0,
+                    help="взять из файла строку N (1-based) без вопроса — для скриптов")
+    ap.add_argument("--proxy-scheme", default="http",
+                    help="схема для строк без ://; для mcccx-прокси = https (по умолчанию http)")
     ap.add_argument("--rounds", type=int, default=10)
     ap.add_argument("--max-puzzles", type=int, default=6,
                     help="сколько головоломок подряд решать в одном заходе")
@@ -710,6 +735,32 @@ def main() -> None:
     ap.add_argument("--exit-port", type=int, default=0,
                     help="порт выхода xray на сервере (напр. 10859=de2); включает авто-тоннель")
     args = ap.parse_args()
+
+    # --- выбор внешнего прокси (платные из файла / напрямую) ---
+    chosen = args.proxy_opt or args.proxy  # --proxy или позиционный (устар.)
+    if not chosen and args.proxy_file:
+        try:
+            lines = [ln.strip() for ln in open(args.proxy_file, encoding="utf-8")
+                     if ln.strip() and not ln.strip().startswith("#")]
+        except OSError as exc:
+            raise SystemExit(f"не читается файл прокси {args.proxy_file}: {exc}")
+        if not lines:
+            raise SystemExit(f"файл прокси пуст: {args.proxy_file}")
+        if args.proxy_index:
+            if not (1 <= args.proxy_index <= len(lines)):
+                raise SystemExit(f"--proxy-index {args.proxy_index} вне 1..{len(lines)}")
+            chosen = lines[args.proxy_index - 1]
+        else:
+            print("Выбери прокси:")
+            for i, ln in enumerate(lines, 1):
+                print(f"  {i:>2}) {ln}")
+            raw = input("номер: ").strip()
+            if not raw.isdigit() or not (1 <= int(raw) <= len(lines)):
+                raise SystemExit("нужен номер из списка")
+            chosen = lines[int(raw) - 1]
+    if chosen and "://" not in chosen:
+        chosen = f"{args.proxy_scheme}://{chosen}"
+    args.proxy = chosen  # единое поле, которым дальше пользуется весь код
 
     tun = None
     # Тоннель нужен всегда (БД на сервере), а вот порт выхода — только если
@@ -767,7 +818,10 @@ def main() -> None:
             print("      Надёжнее задать заранее:  set PM_SSH_PASS=пароль", flush=True)
             print("   3) Не режет ли исходящий 22-й порт сеть/провайдер/антивирус.", flush=True)
             raise SystemExit(1)
-        args.proxy = f"http://127.0.0.1:{lp_proxy}" if args.exit_port else ""
+        # Только при выходе через сервер прокси = локальный порт тоннеля.
+        # Иначе оставляем внешний прокси (--proxy/--proxy-file) или пусто (свой канал).
+        if args.exit_port:
+            args.proxy = f"http://127.0.0.1:{lp_proxy}"
         args.dsn = f"postgresql://parkrun:parkrun_world_local@127.0.0.1:{lp_db}/parkrun_world"
 
         def ensure_tunnel() -> bool:
@@ -804,6 +858,34 @@ def main() -> None:
         print("тоннель поднят: " + (f"выход → {args.proxy}" if args.proxy
                                     else "запросы идут СВОИМ каналом (без прокси)") + "\n",
               flush=True)
+
+    # Предпроверка внешнего прокси: сразу видно, авторизует ли он ЭТУ машину,
+    # а не выясняется через минуту работы. Для платных mcccx с привязкой к IP
+    # это главный источник «ничего не работает».
+    if args.proxy and "127.0.0.1" not in args.proxy:
+        import httpx as _hx
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+        try:
+            with _hx.Client(proxy=args.proxy, timeout=15, follow_redirects=True,
+                            headers={"User-Agent": ua}) as _c:
+                _r = _c.get("https://www.parkrun.org.uk/parkrunner/620/")
+            if "(A620)" in _r.text:
+                print(f"прокси OK — проходит без капчи ({proxy_label(args.proxy)})\n", flush=True)
+            elif _r.status_code in (403, 405) or "Human Verification" in _r.text:
+                print(f"прокси OK — даёт капчу, будем решать ({proxy_label(args.proxy)})\n", flush=True)
+            else:
+                print(f"прокси ответил HTTP {_r.status_code} — необычно, но продолжаю\n", flush=True)
+        except Exception as exc:
+            if tun is not None:
+                try:
+                    tun.stop()
+                except Exception:
+                    pass
+            raise SystemExit(
+                f"\n!! Прокси не отвечает: {type(exc).__name__}: {str(exc)[:120]}\n"
+                "   Вероятнее всего он НЕ авторизует IP этой машины (привязка к другому IP).\n"
+                "   Перепривяжи прокси у провайдера на этот IP или запускай с сервера.")
 
     try:
         if args.fast:
