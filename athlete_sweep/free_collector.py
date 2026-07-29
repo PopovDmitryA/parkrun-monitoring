@@ -365,14 +365,18 @@ async def _record_net_fail(pool: AsyncConnectionPool, proxy: str) -> None:
         await conn.commit()
 
 
-async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[int]") -> None:
+async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[int]",
+                 delay: float | None = None) -> None:
     """FETCH-ONLY: берёт ID из очереди оркестратора → качает 2 страницы →
-    gzip в папку → status='collected'. НИКАКОГО парсинга (он на отдельном ПК)."""
+    gzip в папку → status='collected'. НИКАКОГО парсинга (он на отдельном ПК).
+
+    Задержку получаем ПАРАМЕТРОМ от супервизора (он и так читает free_proxies).
+    Раньше воркер сам лез за ней в БД первым же действием — и при поднятии 200
+    воркеров разом все они одновременно требовали коннект, пул захлёбывался,
+    воркеры умирали ещё до старта («Task exception was never retrieved»), а сбор
+    вставал при куче доступных прокси."""
     consec = 0
-    async with pool.connection() as conn:
-        row = await (await conn.execute(
-            "SELECT delay_sec FROM free_proxies WHERE proxy=%s", (proxy,))).fetchone()
-    delay = float(row[0]) if row and row[0] else DELAY
+    delay = float(delay) if delay else DELAY
     try:
         async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=20,
                                      headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
@@ -473,8 +477,8 @@ async def main() -> None:
             # (28.07 такой таймаут убил весь сбор до ручного перезапуска.)
             try:
                 async with pool.connection() as conn:
-                    active = [r[0] for r in await (await conn.execute(
-                        """SELECT proxy FROM free_proxies
+                    active = [(r[0], r[1]) for r in await (await conn.execute(
+                        """SELECT proxy, delay_sec FROM free_proxies
                            WHERE last_ok_at IS NOT NULL
                              AND (cooldown_until IS NULL OR cooldown_until<=now())
                            ORDER BY ban_level, last_ok_at DESC LIMIT %s""", (TARGET,))).fetchall()]
@@ -482,9 +486,9 @@ async def main() -> None:
                 print(f"[sup] пул занят ({type(exc).__name__}), пропускаю цикл", flush=True)
                 await asyncio.sleep(5)
                 continue
-            for proxy in active:
+            for proxy, pdelay in active:
                 if proxy not in tasks:
-                    tasks[proxy] = asyncio.create_task(worker(pool, proxy, queue))
+                    tasks[proxy] = asyncio.create_task(worker(pool, proxy, queue, pdelay))
             if loops % 5 == 0:
                 print(f"[orch] очередь {queue.qsize()} ID в памяти", flush=True)
             # добор новых прокси — в ФОНЕ (не блокирует запуск/работу воркеров),
