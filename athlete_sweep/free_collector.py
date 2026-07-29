@@ -127,7 +127,10 @@ SOURCES = [
 
 TARGET = int(os.getenv("PM_FREE_TARGET", "200"))          # желаемое число активных прокси (одновременных воркеров)
 DELAY = float(os.getenv("PM_FREE_DELAY", "27"))           # задержка между атлетами на прокси
-POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "15"))        # коннектов к БД
+POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "40"))        # коннектов к БД
+# NB: 15 хватало, пока сетевые сбои уводили прокси в долгую отлёжку. После
+# развода причин (28.07) живых воркеров стало кратно больше, пул исчерпывался
+# за 30с и супервизор падал с PoolTimeout, роняя весь сбор.
 # Параллельность валидации держим умеренной: бокс 2-ядерный и делит ресурсы с
 # живым сайтом, а живые прокси медленные (5-9с) — при 200-параллели они не
 # укладывались в таймаут под контеншеном и пул выходил пустым.
@@ -452,13 +455,21 @@ async def main() -> None:
             for p in [p for p, t in tasks.items() if t.done()]:
                 del tasks[p]
             # СНАЧАЛА поднимаем воркеров на уже-валидных прокси (липкий пул),
-            # чтобы сбор шёл сразу и не простаивал во время добора
-            async with pool.connection() as conn:
-                active = [r[0] for r in await (await conn.execute(
-                    """SELECT proxy FROM free_proxies
-                       WHERE last_ok_at IS NOT NULL
-                         AND (cooldown_until IS NULL OR cooldown_until<=now())
-                       ORDER BY ban_level, last_ok_at DESC LIMIT %s""", (TARGET,))).fetchall()]
+            # чтобы сбор шёл сразу и не простаивал во время добора.
+            # PoolTimeout здесь НЕ должен ронять процесс: при всплеске воркеров
+            # пул бывает занят целиком, и это временно — пропускаем цикл и ждём.
+            # (28.07 такой таймаут убил весь сбор до ручного перезапуска.)
+            try:
+                async with pool.connection() as conn:
+                    active = [r[0] for r in await (await conn.execute(
+                        """SELECT proxy FROM free_proxies
+                           WHERE last_ok_at IS NOT NULL
+                             AND (cooldown_until IS NULL OR cooldown_until<=now())
+                           ORDER BY ban_level, last_ok_at DESC LIMIT %s""", (TARGET,))).fetchall()]
+            except Exception as exc:
+                print(f"[sup] пул занят ({type(exc).__name__}), пропускаю цикл", flush=True)
+                await asyncio.sleep(5)
+                continue
             for proxy in active:
                 if proxy not in tasks:
                     tasks[proxy] = asyncio.create_task(worker(pool, proxy, queue))
