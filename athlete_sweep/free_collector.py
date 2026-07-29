@@ -125,7 +125,12 @@ SOURCES = [
     "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
 ]
 
-TARGET = int(os.getenv("PM_FREE_TARGET", "200"))          # желаемое число активных прокси (одновременных воркеров)
+TARGET = int(os.getenv("PM_FREE_TARGET", "80"))           # одновременных воркеров
+# Почему 80, а не 200: бокс 2-ядерный и делит CPU с живым сайтом. При 200 воркерах
+# событийный цикл упирался в ядро (74% CPU одним процессом), коннекты к БД не
+# выдавались за 30с, и падали даже обработчики ошибок — сбор вставал полностью.
+# Раньше 200 «работало» лишь потому, что живых воркеров реально было ~45:
+# остальные лежали в отлёжке. Как только отлёжку починили, потолок и вскрылся.
 DELAY = float(os.getenv("PM_FREE_DELAY", "27"))           # задержка между атлетами на прокси
 POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "60"))        # коннектов к БД
 # NB: 15 хватало, пока сетевые сбои уводили прокси в долгую отлёжку. После
@@ -417,7 +422,11 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
                     await _requeue(pool, aid)
                     consec += 1
                     if consec >= MAX_CONSEC_ERR:
-                        await _record_ban(pool, proxy); return
+                        try:
+                            await _record_ban(pool, proxy)
+                        except Exception:
+                            pass  # занят пул — просто уходим, метку поставит следующий цикл
+                        return
                 except PoolTimeout:
                     # Занят НАШ пул коннектов к БД — прокси тут ни при чём.
                     # Раньше это считалось его сбоем: он парковался, возвращался,
@@ -434,11 +443,18 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
                     await _requeue(pool, aid, repr(exc)[:200])
                     consec += 1
                     if consec >= MAX_CONSEC_ERR:
-                        await _record_net_fail(pool, proxy); return
+                        try:
+                            await _record_net_fail(pool, proxy)
+                        except Exception:
+                            pass  # пул занят — не роняем задачу из-за пометки
+                        return
                 await asyncio.sleep(delay * random.uniform(0.85, 1.15))
     except Exception:
         # Клиент не поднялся / соединение сдохло целиком — тоже сеть, не бан.
-        await _record_net_fail(pool, proxy)
+        try:
+            await _record_net_fail(pool, proxy)
+        except Exception:
+            pass
 
 
 class _Protected(Exception):
