@@ -31,7 +31,7 @@ import shutil
 from pathlib import Path
 
 import httpx
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -127,7 +127,7 @@ SOURCES = [
 
 TARGET = int(os.getenv("PM_FREE_TARGET", "200"))          # желаемое число активных прокси (одновременных воркеров)
 DELAY = float(os.getenv("PM_FREE_DELAY", "27"))           # задержка между атлетами на прокси
-POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "40"))        # коннектов к БД
+POOL_MAX = int(os.getenv("PM_FREE_DB_POOL", "60"))        # коннектов к БД
 # NB: 15 хватало, пока сетевые сбои уводили прокси в долгую отлёжку. После
 # развода причин (28.07) живых воркеров стало кратно больше, пул исчерпывался
 # за 30с и супервизор падал с PoolTimeout, роняя весь сбор.
@@ -414,6 +414,17 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
                     consec += 1
                     if consec >= MAX_CONSEC_ERR:
                         await _record_ban(pool, proxy); return
+                except PoolTimeout:
+                    # Занят НАШ пул коннектов к БД — прокси тут ни при чём.
+                    # Раньше это считалось его сбоем: он парковался, возвращался,
+                    # снова упирался в занятый пул — и так по кругу, пока весь
+                    # сбор не вставал. Теперь просто ждём и пробуем дальше.
+                    try:
+                        await _requeue(pool, aid, "db pool busy")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(5)
+                    continue
                 except Exception as exc:
                     # Сетевой сбой — НЕ бан: короткая пауза, лесенка не растёт.
                     await _requeue(pool, aid, repr(exc)[:200])
@@ -440,7 +451,8 @@ async def _replenish_bg(pool: AsyncConnectionPool) -> None:
 
 async def main() -> None:
     dsn = os.environ["PM_WORLD_DSN"]
-    pool = AsyncConnectionPool(dsn, min_size=2, max_size=POOL_MAX, open=False)
+    # min_size повышен: при всплеске воркеров пул не успевал дорастать с 2
+    pool = AsyncConnectionPool(dsn, min_size=10, max_size=POOL_MAX, open=False)
     await pool.open()
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     print(f"free-сборщик (FETCH-ONLY): TARGET={TARGET}, DELAY={DELAY}с, папка={RAW_DIR}", flush=True)
