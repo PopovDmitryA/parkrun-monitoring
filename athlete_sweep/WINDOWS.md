@@ -110,9 +110,11 @@ py -m athlete_sweep.file_parser --delete --threads 8
 ```cmd
 py -m pip install --upgrade pip
 py -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-py -m pip install open_clip_torch playwright
+py -m pip install open_clip_torch playwright socksio
 py -m playwright install chromium
 ```
+
+`socksio` нужен, чтобы httpx ходил через SOCKS-прокси локального xray (см. ниже).
 
 **Почему отдельный index-url для torch:** без него pip тянет сборку под видеокарту
 (CUDA) — это ~2.5 ГБ, и на машине без нужных драйверов установка часто падает.
@@ -177,3 +179,32 @@ py -m athlete_sweep.waf_solver --fast --proxy-file paid_proxies.txt --limit 0 --
 
 NB: на Windows этот сценарий пока не прогонялся — если что-то пойдёт не так,
 покажи вывод целиком.
+
+
+---
+
+# Приватные выходы нативно (локальный xray на винде)
+
+Чтобы гнать приватные VPN-выходы БЕЗ сервера (путь Б). Файлы `xray_windows.json`
+и `private_local.txt` тебе присланы отдельно (в них твои VPN-секреты — не выкладывай).
+
+1. Скачай `xray.exe` — github.com/XTLS/Xray-core/releases → `Xray-windows-64.zip`.
+2. Положи `xray.exe`, `xray_windows.json`, `private_local.txt` в одну папку.
+3. **Окно 1** (держать открытым) — поднять все выходы локально:
+   ```cmd
+   xray.exe -c xray_windows.json
+   ```
+   Поднимет 14 локальных SOCKS5-портов 10851–10864, каждый — свой VLESS-выход.
+4. **Окна 2–6** — по решателю на выход:
+   ```cmd
+   py -m athlete_sweep.waf_solver --fast --proxy-file private_local.txt --limit 0 --delay 2
+   ```
+   Выбираешь номер выхода. В каждом окне — свой.
+
+ВАЖНО: инбаунды xray — **SOCKS5**, а не HTTP. С HTTP-прокси Playwright-Chromium на
+винде падал `ERR_PROXY_CONNECTION_FAILED`; на SOCKS5 работает (проверено). Поэтому
+`private_local.txt` содержит `socks5://…`, и httpx для этого требует `socksio`.
+
+ВАЖНО про баны: эти VPN-аккаунты сейчас крутит серверный manager. Гнать те же
+выходы ещё и с винды = двойной туннель = отлёжка. Скажи, когда винда поедет —
+остановлю серверный manager, чтобы выходы освободились.
