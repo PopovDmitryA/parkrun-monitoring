@@ -763,7 +763,11 @@ def main() -> None:
         args.exit_port = rows[int(raw) - 1][1]
 
     # --- выбор внешнего прокси (платные из файла / напрямую) ---
-    chosen = args.proxy_opt or args.proxy  # --proxy или позиционный (устар.)
+    # ТОЛЬКО из --proxy. Позиционный больше НЕ читаем: старый вызов «... unused --fast»
+    # передаёт заглушку unused, и если её принять за прокси — запуск падает на
+    # предпроверке (http://unused не отвечает). Позиционный оставлен принимаемым,
+    # но игнорируется — для обратной совместимости со старой командой.
+    chosen = args.proxy_opt
     if not chosen and args.proxy_file:
         try:
             lines = [ln.strip() for ln in open(args.proxy_file, encoding="utf-8")
