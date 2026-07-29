@@ -734,7 +734,33 @@ def main() -> None:
                     help="БЫСТРЫЙ режим: httpx качает страницы, браузер только на капчу")
     ap.add_argument("--exit-port", type=int, default=0,
                     help="порт выхода xray на сервере (напр. 10859=de2); включает авто-тоннель")
+    ap.add_argument("--exit-file", default="",
+                    help="файл приватных выходов (строки «имя порт»); при старте спросит, какой")
     args = ap.parse_args()
+
+    # Выбор приватного выхода из файла (путь А: через серверный xray по SSH-тоннелю).
+    if not args.exit_port and args.exit_file:
+        try:
+            rows = []
+            for ln in open(args.exit_file, encoding="utf-8"):
+                ln = ln.strip()
+                if not ln or ln.startswith("#"):
+                    continue
+                parts = ln.replace("=", " ").split()
+                port = int(parts[-1])
+                name = parts[0] if len(parts) > 1 else str(port)
+                rows.append((name, port))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"не разобрать файл выходов {args.exit_file}: {exc}")
+        if not rows:
+            raise SystemExit(f"файл выходов пуст: {args.exit_file}")
+        print("Выбери приватный выход:")
+        for i, (nm, pt) in enumerate(rows, 1):
+            print(f"  {i:>2}) {nm}  (порт {pt})")
+        raw = input("номер: ").strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= len(rows)):
+            raise SystemExit("нужен номер из списка")
+        args.exit_port = rows[int(raw) - 1][1]
 
     # --- выбор внешнего прокси (платные из файла / напрямую) ---
     chosen = args.proxy_opt or args.proxy  # --proxy или позиционный (устар.)
