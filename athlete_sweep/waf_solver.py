@@ -450,9 +450,11 @@ def work_fast(args) -> None:
     hostshort = _sock.gethostname().split('.')[0]
     if getattr(args, "exit_port", 0):
         board = f"mac+{exit_label}"
-    elif args.proxy and "127.0.0.1" not in args.proxy:
-        # через платный прокси — метка по его IP, чтобы 5-6 терминалов не смешивались
-        board = f"{hostshort}-{proxy_label(args.proxy)}"
+    elif args.proxy:
+        # через прокси (в т.ч. локальный socks выхода) — метка по имени выхода из
+        # файла, иначе по адресу; чтобы 5-6 терминалов не смешивали счётчики
+        label = getattr(args, "proxy_label", "") or proxy_label(args.proxy)
+        board = f"{hostshort}-{label}"
     else:
         board = f"{hostshort}-direct"
     db(lambda c: (c.execute(
@@ -794,6 +796,15 @@ def main() -> None:
             if not raw.isdigit() or not (1 <= int(raw) <= len(lines)):
                 raise SystemExit("нужен номер из списка")
             chosen = lines[int(raw) - 1]
+    # Отрезаем ИНЛАЙН-комментарий (напр. «socks5://127.0.0.1:10859  # de2»): без
+    # этого весь хвост уезжал в адрес прокси, и Chromium падал ERR_PROXY_CONNECTION_FAILED.
+    # Из комментария заодно берём имя выхода для табло.
+    args.proxy_label = ""
+    if chosen and "#" in chosen:
+        chosen, _, lbl = chosen.partition("#")
+        args.proxy_label = lbl.strip()
+    if chosen:
+        chosen = chosen.split()[0].strip()  # только сам адрес, без пробелов/хвостов
     if chosen and "://" not in chosen:
         chosen = f"{args.proxy_scheme}://{chosen}"
     args.proxy = chosen  # единое поле, которым дальше пользуется весь код
