@@ -333,8 +333,14 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
     Картинки НЕ блокируем: головоломка — это и есть картинки в canvas.
     UA тот же, что у httpx: WAF привязывает токен в том числе к нему.
     """
-    br = p.chromium.launch(headless=True,
-                           **({"proxy": {"server": proxy}} if proxy else {}))
+    # Прямой режим: ЯВНО отключаем прокси у Chromium (--no-proxy-server), иначе он
+    # подхватывает СИСТЕМНЫЙ прокси Windows (напр. INCY) и падает
+    # ERR_PROXY_CONNECTION_FAILED — даже когда мы прокси не задавали. httpx системный
+    # прокси игнорирует, поэтому качал нормально, а браузер лез в него.
+    if proxy:
+        br = p.chromium.launch(headless=True, proxy={"server": proxy})
+    else:
+        br = p.chromium.launch(headless=True, args=["--no-proxy-server"])
     ctx = br.new_context(user_agent=ua, viewport={"width": 1280, "height": 900})
     # Ресурсы намеренно НЕ режем через ctx.route. Пробовали (шрифты/стили/медиа),
     # чтобы снизить число соединений через тоннель — выигрыша не увидели, а
