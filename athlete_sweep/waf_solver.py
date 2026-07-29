@@ -193,6 +193,26 @@ def next_round_no() -> int:
     return (max(ns) + 1) if ns else 1
 
 
+def _wait_for(pg, predicate, timeout: float = 25.0, step: float = 0.5) -> bool:
+    """Ждать РЕАЛЬНОГО появления элемента вместо фиксированной паузы.
+
+    Замер 28.07: Мак (канал через VPN) проходил 79% капч, Windows (прямой
+    канал) — 96%. Модель одна, значит дело было не в распознавании: по
+    медленному каналу головоломка не успевала отрисоваться за жёсткие 6с,
+    solve_once читал пустую страницу, возвращал «не нашёл задание», и капча
+    записывалась в проваленные.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        time.sleep(step)
+    return False
+
+
 def solve_once(pg, clip: Clip, round_no: int, verbose: bool = True) -> dict:
     """Один заход: снять головоломку, классифицировать, прокликать, подтвердить."""
     from io import BytesIO
@@ -258,7 +278,10 @@ def solve_once(pg, clip: Clip, round_no: int, verbose: bool = True) -> dict:
                 break
         except Exception:
             continue
-    time.sleep(5)
+    # Ждём реакции страницы (новая головоломка или её исчезновение), до 25с.
+    before = txt[:400]
+    _wait_for(pg, lambda: pg.inner_text("body")[:400] != before, timeout=25)
+    time.sleep(1)
     body = pg.content()
     # Успех = капчи на странице БОЛЬШЕ НЕТ. Раньше проверяли по штрихкоду (A620),
     # но в рабочем режиме качаются другие атлеты — у них штрихкод свой, и условие
@@ -268,7 +291,7 @@ def solve_once(pg, clip: Clip, round_no: int, verbose: bool = True) -> dict:
     return info
 
 
-def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 4) -> tuple[bool, int, int]:
+def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 6) -> tuple[bool, int, int]:
     """Провести страницу через капчу. Возвращает (прошли, решено_головоломок, rn)."""
     for sel in ["button:has-text('Begin')", "text=Begin"]:
         try:
@@ -278,7 +301,9 @@ def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 4) -> tuple[bool, i
                 break
         except Exception:
             continue
-    time.sleep(6)
+    # Ждём, пока головоломка реально отрисуется (до 30с), а не гадаем паузой.
+    if not _wait_for(pg, lambda: "Choose all" in pg.inner_text("body")[:3000], timeout=30):
+        print("    головоломка не отрисовалась за 30с", flush=True)
     solved = 0
     for _ in range(max_puzzles):
         r = solve_once(pg, clip, rn); rn += 1
@@ -313,7 +338,8 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
     token = None
     try:
         pg.goto(URL, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(4)
+        _wait_for(pg, lambda: any(m in pg.content() for m in
+                                  ("Human Verification", "Choose all", BARCODE)), timeout=25)
         html = pg.content()
         if "Human Verification" in html or "Choose all" in html:
             ok, _n, rn = pass_captcha(pg, clip, rn)
@@ -670,7 +696,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Свой решатель капчи AWS WAF")
     ap.add_argument("proxy", help="прокси выхода, напр. http://127.0.0.1:10859")
     ap.add_argument("--rounds", type=int, default=10)
-    ap.add_argument("--max-puzzles", type=int, default=4,
+    ap.add_argument("--max-puzzles", type=int, default=6,
                     help="сколько головоломок подряд решать в одном заходе")
     ap.add_argument("--work", action="store_true",
                     help="РАБОЧИЙ режим: качать реальных атлетов из очереди и писать в БД")
