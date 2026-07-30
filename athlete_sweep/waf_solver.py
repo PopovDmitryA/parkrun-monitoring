@@ -366,10 +366,21 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
     except Exception as exc:
         print(f"    добыча токена не удалась: {exc!r}", flush=True)
     finally:
+        # НЕ ctx.close(); br.close() одной строкой в общем try: если ctx.close()
+        # кинет исключение, br.close() вообще не выполнится — сам процесс браузера
+        # (+ его GPU/utility-подпроцессы) останется висеть навсегда. Обнаружено
+        # 30.07 — за несколько часов накопилось 13 таких зависших chrome.exe
+        # (~1.3 ГБ), одни и те же PID, память не менялась — то есть просто сидели.
+        # Раздельные try + видимый лог вместо молчаливого pass — чтобы при
+        # повторе было видно ПОЧЕМУ, а не гадать по Task Manager.
         try:
-            ctx.close(); br.close()
-        except Exception:
-            pass
+            ctx.close()
+        except Exception as exc:
+            print(f"    контекст браузера не закрылся: {exc!r}", flush=True)
+        try:
+            br.close()
+        except Exception as exc:
+            print(f"    !! браузер НЕ закрылся, процесс мог остаться висеть: {exc!r}", flush=True)
     return token, rn
 
 
@@ -726,7 +737,16 @@ def work_mode(args) -> None:
         except KeyboardInterrupt:
             print("\nостановлено.", flush=True)
         finally:
-            ctx.close(); br.close()
+            # Раздельно, не одной строкой — та же причина, что в harvest_token():
+            # если ctx.close() кинет исключение, br.close() не выполнится вовсе.
+            try:
+                ctx.close()
+            except Exception as exc:
+                print(f"  контекст браузера не закрылся: {exc!r}", flush=True)
+            try:
+                br.close()
+            except Exception as exc:
+                print(f"  !! браузер НЕ закрылся, процесс мог остаться висеть: {exc!r}", flush=True)
             try:
                 db.conn.close()
             except Exception:
