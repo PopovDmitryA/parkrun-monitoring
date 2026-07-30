@@ -474,6 +474,31 @@ def work_fast(args) -> None:
         except Exception:
             pass
 
+    # Имя выхода в ЗАГОЛОВОК окна — видно страну прямо в тайтлбаре/таскбаре cmd,
+    # не останавливая процесс (в истории консоли не найти, когда окон много).
+    try:
+        if os.name == "nt":
+            os.system(f"title parkrun {board}")
+        else:
+            print(f"\033]0;parkrun {board}\007", end="", flush=True)
+    except Exception:
+        pass
+
+    # Печать «через какой выход работало окно» — надёжно, через atexit: срабатывает
+    # при ЛЮБОМ штатном завершении (Ctrl+C, лимит, пустая очередь), даже если
+    # Playwright перехватил сигнал и обычный except KeyboardInterrupt не отработал.
+    import atexit
+    _exit_shown = {"v": False}
+
+    def _print_exit_id() -> None:
+        if _exit_shown["v"]:
+            return
+        _exit_shown["v"] = True
+        where = args.proxy if args.proxy else "прямой канал (без прокси)"
+        print(f"\n>>> ЭТО ОКНО РАБОТАЛО ЧЕРЕЗ: «{board}»  ·  {where}", flush=True)
+
+    atexit.register(_print_exit_id)
+
     print("загружаю CLIP…", flush=True)
     clip = Clip()
     print(f"готово. воркер {worker} · на табло «{board}» · задержка {args.delay}с\n", flush=True)
@@ -576,7 +601,8 @@ def work_fast(args) -> None:
             except Exception:
                 pass
     el = time.time() - t_start
-    print("\n" + "=" * 46)
+    _print_exit_id()  # выход окна — гарантированно (и через atexit тоже)
+    print("=" * 46)
     print(f"АТЛЕТОВ записано: {done} за {el/60:.1f} мин "
           f"({el/max(done,1):.1f}с на атлета, ~{done/max(el,1)*3600:.0f}/час)")
     print(f"капч: {captchas}" + (f" (1 на {done/captchas:.0f} атлетов)" if captchas else ""))
