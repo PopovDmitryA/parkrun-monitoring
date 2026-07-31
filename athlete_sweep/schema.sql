@@ -87,3 +87,9 @@ ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS captcha_total INTEGER NOT NULL 
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS captcha_solved INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS last_captcha_at TIMESTAMPTZ;
 
+-- Незакрывшиеся процессы браузера (добавлено 30.07.2026, диагностика утечки
+-- Chromium — вместо вычитывания консоли на тысячах атлетов в час).
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS browser_close_fail_total INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS last_close_fail_at TIMESTAMPTZ;
+ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS last_close_fail_reason TEXT;
+

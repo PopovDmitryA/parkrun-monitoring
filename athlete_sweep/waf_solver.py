@@ -327,7 +327,7 @@ def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 6) -> tuple[bool, i
     return False, solved, rn
 
 
-def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | None, int]:
+def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | None, int, str | None]:
     """Поднять браузер, пройти капчу, снять aws-waf-token и закрыться.
 
     Картинки НЕ блокируем: головоломка — это и есть картинки в canvas.
@@ -350,19 +350,20 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
     # Картинки резать нельзя в принципе: головоломка — это картинки в canvas.
     pg = ctx.new_page()
     token = None
+    captcha_ok = True
+    close_fail: str | None = None
     try:
         pg.goto(URL, wait_until="domcontentloaded", timeout=60000)
         _wait_for(pg, lambda: any(m in pg.content() for m in
                                   ("Human Verification", "Choose all", BARCODE)), timeout=25)
         html = pg.content()
         if "Human Verification" in html or "Choose all" in html:
-            ok, _n, rn = pass_captcha(pg, clip, rn)
-            if not ok:
-                return None, rn
-        for c in ctx.cookies():
-            if c["name"] == "aws-waf-token":
-                token = c["value"]
-                break
+            captcha_ok, _n, rn = pass_captcha(pg, clip, rn)
+        if captcha_ok:
+            for c in ctx.cookies():
+                if c["name"] == "aws-waf-token":
+                    token = c["value"]
+                    break
     except Exception as exc:
         print(f"    добыча токена не удалась: {exc!r}", flush=True)
     finally:
@@ -380,8 +381,11 @@ def harvest_token(p, proxy: str, clip: Clip, rn: int, ua: str) -> tuple[str | No
         try:
             br.close()
         except Exception as exc:
+            close_fail = repr(exc)[:200]
             print(f"    !! браузер НЕ закрылся, процесс мог остаться висеть: {exc!r}", flush=True)
-    return token, rn
+    if not captcha_ok:
+        return None, rn, close_fail
+    return token, rn, close_fail
 
 
 def work_fast(args) -> None:
@@ -539,7 +543,13 @@ def work_fast(args) -> None:
                             "UPDATE sweep_exits SET captcha_total=captcha_total+1, "
                             "last_captcha_at=now() WHERE name=%s", (board,)), c.commit()))
                         print(f"  капча на {aid} — поднимаю браузер за токеном…", flush=True)
-                        token, rn = harvest_token(p, args.proxy, clip, rn, UA)
+                        token, rn, close_fail = harvest_token(p, args.proxy, clip, rn, UA)
+                        if close_fail:
+                            db(lambda c: (c.execute(
+                                "UPDATE sweep_exits SET browser_close_fail_total="
+                                "browser_close_fail_total+1, last_close_fail_at=now(), "
+                                "last_close_fail_reason=%s WHERE name=%s",
+                                (close_fail, board)), c.commit()))
                         if not token:
                             db(lambda c: (c.execute(
                                 "UPDATE crawl_queue SET status='pending', claimed_by=NULL "
