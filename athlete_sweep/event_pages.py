@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS event_sections (
     heading_level INTEGER,
     heading       TEXT,
     canonical_key TEXT,
-    content_html  TEXT,
     content_text  TEXT,
     PRIMARY KEY (slug, page, position)
 );
@@ -131,12 +130,14 @@ def parse_sections(html: str) -> tuple[list[dict], str | None, str | None]:
             frag = BeautifulSoup(raw, "html.parser")
             text = _clean(frag.get_text(" ", strip=True))
             heading = _clean(h.get_text(" ", strip=True))
-            if not heading and not text:
+            # Блоки без текста (карта-iframe «Course Map», заголовок-зонтик
+            # «Getting There») для анализа бесполезны — не сохраняем.
+            if not text:
                 continue
             sections.append({
                 "area": area, "position": pos,
                 "heading_level": int(h.name[1]), "heading": heading,
-                "canonical_key": None, "content_html": raw, "content_text": text,
+                "canonical_key": None, "content_text": text,
             })
             pos += 1
     return sections, lang, og_image
@@ -149,12 +150,18 @@ def assign_canonical(page: str, sections: list[dict]) -> None:
             if i < len(HOME_KEYS):
                 s["canonical_key"] = HOME_KEYS[i]
     else:
+        # После выброса пустых блоков порядок стабилен во всех странах
+        # (проверено на gb/pl/de/jp/au/za/se/us + junior):
+        # left  = [интро трассы, (Course Safety, Age Grading — бойлерплейт)]
+        # right = [описание трассы, удобства, старт, транспорт/пешком/машина, кофе]
         left = [s for s in sections if s["area"] == "left"]
         right = [s for s in sections if s["area"] == "right"]
         if left:
             left[0]["canonical_key"] = "course_intro"
         if right:
-            right[0]["canonical_key"] = "course_map"
+            right[0]["canonical_key"] = "course_description"
+        if len(right) > 1:
+            right[1]["canonical_key"] = "facilities"
 
 
 # ---------------------------------------------------------------- фетч
@@ -379,10 +386,10 @@ def main() -> None:
             for s in sections:
                 c.execute("""
                     INSERT INTO event_sections (slug, page, area, position, heading_level,
-                                                heading, canonical_key, content_html, content_text)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                                heading, canonical_key, content_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                     (ev["slug"], page, s["area"], s["position"], s["heading_level"],
-                     s["heading"], s["canonical_key"], s["content_html"], s["content_text"]))
+                     s["heading"], s["canonical_key"], s["content_text"]))
             c.commit()
 
         db(_write)

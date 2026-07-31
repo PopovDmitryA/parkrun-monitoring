@@ -112,9 +112,8 @@ CREATE TABLE IF NOT EXISTS event_sections (
     position      INTEGER NOT NULL,       -- порядок на странице
     heading_level INTEGER,                -- 2|3|4
     heading       TEXT,                   -- заголовок на языке страны
-    canonical_key TEXT,                   -- what_is/when/where/... — где надёжно
-    content_html  TEXT,
-    content_text  TEXT,
+    canonical_key TEXT,                   -- what_is/when/where/course_description/…
+    content_text  TEXT,                   -- только текст: html для анализа не нужен
     PRIMARY KEY (slug, page, position)
 );
 CREATE INDEX IF NOT EXISTS ix_event_sections_key ON event_sections (canonical_key);
