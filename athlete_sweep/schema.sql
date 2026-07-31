@@ -102,7 +102,6 @@ CREATE TABLE IF NOT EXISTS event_pages (
     http_status  INTEGER,
     lang         TEXT,                    -- из <html lang=...>
     og_image     TEXT,                    -- фото события (og:image)
-    raw_gzip     BYTEA,                   -- сырой HTML gzip, для перепарсинга
     fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (slug, page)
 );

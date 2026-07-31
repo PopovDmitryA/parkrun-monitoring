@@ -27,7 +27,6 @@ pm-postgres (тоннель поднимается сам, как в waf_solver)
 from __future__ import annotations
 
 import argparse
-import gzip
 import os
 import pathlib
 import re
@@ -52,7 +51,6 @@ CREATE TABLE IF NOT EXISTS event_pages (
     http_status  INTEGER,
     lang         TEXT,
     og_image     TEXT,
-    raw_gzip     BYTEA,
     fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (slug, page)
 );
@@ -367,17 +365,15 @@ def main() -> None:
     def store(ev: dict, page: str, url: str, status: int, html: str) -> int:
         sections, lang, og_image = parse_sections(html)
         assign_canonical(page, sections)
-        raw = gzip.compress(html.encode("utf-8"))
 
         def _write(c):
             c.execute("""
-                INSERT INTO event_pages (slug, page, url, http_status, lang, og_image, raw_gzip)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO event_pages (slug, page, url, http_status, lang, og_image)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (slug, page) DO UPDATE SET url = EXCLUDED.url,
                     http_status = EXCLUDED.http_status, lang = EXCLUDED.lang,
-                    og_image = EXCLUDED.og_image, raw_gzip = EXCLUDED.raw_gzip,
-                    fetched_at = now()""",
-                (ev["slug"], page, url, status, lang, og_image, raw))
+                    og_image = EXCLUDED.og_image, fetched_at = now()""",
+                (ev["slug"], page, url, status, lang, og_image))
             c.execute("DELETE FROM event_sections WHERE slug = %s AND page = %s",
                       (ev["slug"], page))
             for s in sections:
