@@ -93,3 +93,30 @@ ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS browser_close_fail_total INTEGE
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS last_close_fail_at TIMESTAMPTZ;
 ALTER TABLE sweep_exits ADD COLUMN IF NOT EXISTS last_close_fail_reason TEXT;
 
+-- Описания событий (добавлено 31.07.2026, athlete_sweep/event_pages.py):
+-- главная страница + /course/ каждой локации, секции контентных колонок.
+CREATE TABLE IF NOT EXISTS event_pages (
+    slug         TEXT NOT NULL,
+    page         TEXT NOT NULL,           -- 'home' | 'course'
+    url          TEXT NOT NULL,
+    http_status  INTEGER,
+    lang         TEXT,                    -- из <html lang=...>
+    og_image     TEXT,                    -- фото события (og:image)
+    raw_gzip     BYTEA,                   -- сырой HTML gzip, для перепарсинга
+    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (slug, page)
+);
+CREATE TABLE IF NOT EXISTS event_sections (
+    slug          TEXT NOT NULL,
+    page          TEXT NOT NULL,
+    area          TEXT,                   -- 'left' | 'right' (колонка на странице)
+    position      INTEGER NOT NULL,       -- порядок на странице
+    heading_level INTEGER,                -- 2|3|4
+    heading       TEXT,                   -- заголовок на языке страны
+    canonical_key TEXT,                   -- what_is/when/where/... — где надёжно
+    content_html  TEXT,
+    content_text  TEXT,
+    PRIMARY KEY (slug, page, position)
+);
+CREATE INDEX IF NOT EXISTS ix_event_sections_key ON event_sections (canonical_key);
+
