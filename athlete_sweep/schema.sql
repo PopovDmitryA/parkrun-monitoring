@@ -33,8 +33,17 @@ CREATE INDEX IF NOT EXISTS ix_athletes_russian ON athletes (is_russian_runner) W
 CREATE INDEX IF NOT EXISTS ix_athletes_status ON athletes (status);
 
 -- Забеги атлета (полная история; event_slug — как на /all-странице).
+--
+-- У id НЕТ первичного ключа сознательно (07.08.2026). Настоящий ключ строки —
+-- UNIQUE (athlete_id, event_slug, run_date): по нему идут все вставки
+-- (ON CONFLICT в worker.py) и все чтения. Индекс же PRIMARY KEY (id) при
+-- 40 млн строк весил 867 МБ и не обслужил НИ ОДНОГО запроса (idx_scan = 0 за
+-- всю историю), при этом обновлялся на каждой вставке — а вставка здесь
+-- круглосуточная. Ссылок на runs.id нет ни в коде, ни через внешние ключи
+-- (FK ведёт по athlete_id), поэтому колонка осталась только как технический
+-- счётчик. Если пересоздаёшь базу с нуля — не возвращай сюда PRIMARY KEY.
 CREATE TABLE IF NOT EXISTS runs (
-    id               BIGSERIAL PRIMARY KEY,
+    id               BIGSERIAL,
     athlete_id       BIGINT NOT NULL REFERENCES athletes(athlete_id) ON DELETE CASCADE,
     event_slug       TEXT NOT NULL,
     event_name       TEXT,
