@@ -14,6 +14,19 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
 );
 CREATE INDEX IF NOT EXISTS ix_queue_claim ON crawl_queue (status, claimed_at);
 
+-- ГЛАВНЫЙ индекс очереди (07.08.2026). Запрос claim в worker.py фильтрует по
+-- status='pending', но сортирует по athlete_id — и планировщик из-за ORDER BY
+-- шёл по crawl_queue_pkey с начала таблицы, отбрасывая уже обработанные строки
+-- фильтром. Замер на 2.4 млн собранных: «Rows Removed by Filter: 2 436 359»,
+-- 813 мс на КАЖДЫЙ claim, и время росло линейно вместе с прогрессом обхода —
+-- за неделю темп упал с 14 400 до 7 200 профилей в час.
+--
+-- Частичный индекс держит только pending-строки в порядке athlete_id: это
+-- одновременно и фильтр, и готовая сортировка, поэтому claim берёт первую
+-- запись сразу. Побочный бонус — индекс тает по мере обхода, а не растёт.
+CREATE INDEX IF NOT EXISTS ix_queue_pending ON crawl_queue (athlete_id)
+    WHERE status = 'pending';
+
 -- Атлеты. Домашний парк НЕ храним (на странице его нет; при нужде — вычисляемое).
 CREATE TABLE IF NOT EXISTS athletes (
     athlete_id         BIGINT PRIMARY KEY,
