@@ -45,6 +45,23 @@ CREATE TABLE IF NOT EXISTS athletes (
 CREATE INDEX IF NOT EXISTS ix_athletes_russian ON athletes (is_russian_runner) WHERE is_russian_runner;
 CREATE INDEX IF NOT EXISTS ix_athletes_status ON athletes (status);
 
+-- Провенанс отдельно от свежести (17.08.2026). `source` в worker.store() жёстко
+-- перезаписывается на 'crawl' при КАЖДОЙ записи — значит после перепрохождения
+-- легаси-атлетов признак «пришёл из легаси-выгрузки» был бы потерян. Поэтому
+-- провенанс вынесен в отдельный флаг, который ставится один раз и не меняется:
+--   legacy_seed=true,  source='legacy_migration' — легаси, ещё не перепройден
+--   legacy_seed=true,  source='crawl'            — легаси, актуализирован обходом
+--   legacy_seed=false, source='crawl'            — найден обходом с нуля
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS legacy_seed BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS ix_athletes_legacy_seed ON athletes (legacy_seed) WHERE legacy_seed;
+
+-- Опорные счётчики ДО перепрохождения легаси (17.08.2026): по ним считается,
+-- сколько забегов и волонтёрств добавилось относительно сбора ноября 2025.
+-- Полный снимок runs сознательно НЕ делался (решение Дмитрия) — только тальник:
+--   CREATE TABLE legacy_baseline_2025_11 AS SELECT athlete_id, count(runs),
+--   min/max(run_date), volunteer_summary.total_credits, athletes.parsed_at ...
+-- Базовые числа: 55 139 атлетов, 735 734 забега, 158 662 волонтёрства.
+
 -- Забеги атлета (полная история; event_slug — как на /all-странице).
 --
 -- У id НЕТ первичного ключа сознательно (07.08.2026). Настоящий ключ строки —
