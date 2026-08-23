@@ -317,18 +317,34 @@ def solve_once(pg, clip: Clip, round_no: int, verbose: bool = True) -> dict:
     return info
 
 
-def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 6) -> tuple[bool, int, int]:
-    """Провести страницу через капчу. Возвращает (прошли, решено_головоломок, rn)."""
+def _click_begin(pg) -> bool:
+    """Нажать Begin. True — кнопка нашлась и клик прошёл."""
     for sel in ["button:has-text('Begin')", "text=Begin"]:
         try:
             el = pg.locator(sel).first
             if el.count() and el.is_visible():
                 el.click(timeout=5000)
-                break
+                return True
         except Exception:
             continue
-    # Ждём, пока головоломка реально отрисуется (до 30с), а не гадаем паузой.
-    if not _wait_for(pg, lambda: "Choose all" in pg.inner_text("body")[:3000], timeout=45):
+    return False
+
+
+def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 6) -> tuple[bool, int, int]:
+    """Провести страницу через капчу. Возвращает (прошли, решено_головоломок, rn)."""
+    # Begin жмём с повторами, а не один раз. Скрипт капчи навешивает обработчик
+    # не мгновенно: нажали слишком рано — клик уходит в пустоту, кнопка остаётся
+    # на месте, а мы потом впустую ждём головоломку, которой уже неоткуда взяться.
+    # Повторный клик безвреден: когда головоломка отрисовалась, кнопки на
+    # странице больше нет и _click_begin просто ничего не находит.
+    # Общий бюджет ожидания прежний, 45с — три попытки по 15с.
+    rendered = False
+    for _ in range(3):
+        _click_begin(pg)
+        if _wait_for(pg, lambda: "Choose all" in pg.inner_text("body")[:3000], timeout=15):
+            rendered = True
+            break
+    if not rendered:
         print("    головоломка не отрисовалась за 45с", flush=True)
     solved = 0
     for _ in range(max_puzzles):
