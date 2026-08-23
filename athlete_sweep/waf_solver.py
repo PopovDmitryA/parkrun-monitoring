@@ -328,8 +328,8 @@ def pass_captcha(pg, clip: Clip, rn: int, max_puzzles: int = 6) -> tuple[bool, i
         except Exception:
             continue
     # Ждём, пока головоломка реально отрисуется (до 30с), а не гадаем паузой.
-    if not _wait_for(pg, lambda: "Choose all" in pg.inner_text("body")[:3000], timeout=30):
-        print("    головоломка не отрисовалась за 30с", flush=True)
+    if not _wait_for(pg, lambda: "Choose all" in pg.inner_text("body")[:3000], timeout=45):
+        print("    головоломка не отрисовалась за 45с", flush=True)
     solved = 0
     for _ in range(max_puzzles):
         r = solve_once(pg, clip, rn); rn += 1
