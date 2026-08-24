@@ -133,6 +133,17 @@ SOURCES = [
     "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
     "https://proxy-spider.com/api/proxies.example.txt",
     "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
+    "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt",
+    "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt",
+    "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks4.txt",
+    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt",
+    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt",
+    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
 ]
 
 TARGET = int(os.getenv("PM_FREE_TARGET", "80"))           # одновременных воркеров
@@ -206,11 +217,27 @@ async def _harvest() -> list[str]:
     return ordered
 
 
+def proxy_url(proxy: str, scheme: str = "http") -> str:
+    """URL прокси для клиента. В пуле адрес хранится либо голым ip:port (тогда
+    это HTTP-прокси, как было исторически), либо уже со схемой socks5://ip:port."""
+    return proxy if "://" in proxy else f"{scheme}://{proxy}"
+
+
+def proxy_dict(proxy: str, scheme: str = "http") -> dict[str, str]:
+    u = proxy_url(proxy, scheme)
+    return {"http": u, "https": u}
+
+
+def bare_hostport(proxy: str) -> str:
+    """ip:port без схемы — для TCP-префильтра."""
+    return proxy.split("://", 1)[-1]
+
+
 async def _tcp_alive(proxy: str, sem: asyncio.Semaphore) -> str | None:
     """Дешёвый префильтр: открывается ли TCP на ip:port за 3с. Отсекает ~95%
     мёртвых кандидатов почти без нагрузки, чтобы тяжёлую parkrun-проверку делать
     только по живым — так реально просканировать десятки тысяч адресов."""
-    host, _, port = proxy.partition(":")
+    host, _, port = bare_hostport(proxy).partition(":")
     async with sem:
         try:
             fut = asyncio.open_connection(host, int(port))
@@ -229,16 +256,21 @@ async def _validate(proxy: str, sem: asyncio.Semaphore) -> tuple[str, int] | Non
     """Прокси валиден, если отдаёт НАСТОЯЩУЮ страницу parkrun (атлет 620 →
     штрихкод A620): это отсекает и мёртвые прокси, и капчу/заглушки за один
     запрос. Мёртвые отваливаются по таймауту, до parkrun доходят только живые."""
+    # Схему заранее не знаем: списки отдают голый ip:port, а порт ни о чём не
+    # говорит — 1080 бывает и HTTP, 8080 бывает и SOCKS. Поэтому пробуем обе и
+    # возвращаем адрес УЖЕ СО СХЕМОЙ, чтобы воркер не гадал повторно.
+    # Если адрес пришёл со схемой (из пула), проверяем только её.
+    schemes = ["http", "socks5"] if "://" not in proxy else [proxy.split("://", 1)[0]]
     async with sem:
-        try:
-            async with CurlSession(timeout=12,
-                                   proxies={"http": f"http://{proxy}",
-                                            "https": f"http://{proxy}"}) as c:
-                r = await c.get(VALIDATE_URL, headers={"User-Agent": UA})
-                if r.status_code == 200 and VALIDATE_MARK in r.text:
-                    return proxy, int(r.elapsed.total_seconds() * 1000)
-        except Exception:
-            return None
+        for scheme in schemes:
+            try:
+                async with CurlSession(timeout=12,
+                                       proxies=proxy_dict(proxy, scheme)) as c:
+                    r = await c.get(VALIDATE_URL, headers={"User-Agent": UA})
+                    if r.status_code == 200 and VALIDATE_MARK in r.text:
+                        return proxy_url(proxy, scheme), int(r.elapsed.total_seconds() * 1000)
+            except Exception:
+                continue
     return None
 
 
@@ -399,11 +431,12 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
     consec = 0
     delay = float(delay) if delay else DELAY
     try:
+        # proxy может быть как голым ip:port (HTTP, историческая форма), так и
+        # socks5://ip:port — схему определил и сохранил _validate при добавлении.
         async with CurlSession(timeout=20,
                                headers={"User-Agent": UA,
                                         "Accept-Language": "en-GB,en;q=0.9"},
-                               proxies={"http": f"http://{proxy}",
-                                        "https": f"http://{proxy}"}) as client:
+                               proxies=proxy_dict(proxy)) as client:
             while not _stop.is_set():
                 try:
                     aid = await asyncio.wait_for(queue.get(), timeout=30)
