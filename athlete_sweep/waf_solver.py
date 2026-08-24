@@ -826,6 +826,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0,
                     help="сколько атлетов в рабочем режиме (0 = без предела)")
     ap.add_argument("--delay", type=float, default=2.0, help="пауза между атлетами, сек")
+    ap.add_argument("--local-db", action="store_true",
+                    help="БД рядом (не на сервере) — не поднимать SSH-тоннель, брать --dsn как есть")
     ap.add_argument("--dsn", default="postgresql://parkrun:parkrun_world_local@127.0.0.1:5433/parkrun_world",
                     help="DSN pm-postgres (через SSH-проброс порта 5433)")
     ap.add_argument("--fast", action="store_true",
@@ -903,7 +905,9 @@ def main() -> None:
     # Тоннель нужен всегда (БД на сервере), а вот порт выхода — только если
     # ходим через сервер. Без --exit-port качаем СВОИМ каналом: быстрее, и
     # тоннель тогда всего один — к базе.
-    if args.exit_port or args.fast or args.work:
+    # --local-db: база переехала на эту же машину, тоннель к серверу не нужен.
+    # Исключение — --exit-port: там тоннель нужен ещё и под прокси-выход, не только БД.
+    if args.exit_port or ((args.fast or args.work) and not args.local_db):
         # Сами поднимаем SSH-тоннель сразу к ДВУМ портам: выход xray и pm-postgres.
         # Так скрипт запускается одной командой, без ручного ssh -L в соседнем окне.
         from sshtunnel import SSHTunnelForwarder
