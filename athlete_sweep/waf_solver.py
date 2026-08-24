@@ -27,6 +27,8 @@ import re
 import time
 from collections import Counter
 
+from athlete_sweep.clip_service import make_clip
+
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "data", "waf_captcha")
 URL = "https://www.parkrun.org.uk/parkrunner/620/"
@@ -549,7 +551,7 @@ def work_fast(args) -> None:
     atexit.register(_print_exit_id)
 
     print("загружаю CLIP…", flush=True)
-    clip = Clip()
+    clip = make_clip()
     print(f"готово. воркер {worker} · на табло «{board}» · задержка {args.delay}с\n", flush=True)
 
     rn = next_round_no()
@@ -711,7 +713,7 @@ def work_mode(args) -> None:
     db = Db()
     worker = f"waf-browser:{os.getpid()}"
     print("загружаю CLIP…", flush=True)
-    clip = Clip()
+    clip = make_clip()
     print(f"готово. воркер {worker}\n", flush=True)
 
     rn = next_round_no()
@@ -1045,7 +1047,7 @@ def main() -> None:
     from playwright.sync_api import sync_playwright
 
     print("загружаю CLIP…", flush=True)
-    clip = Clip()
+    clip = make_clip()
     print("модель готова.\n", flush=True)
 
     rn = next_round_no()
