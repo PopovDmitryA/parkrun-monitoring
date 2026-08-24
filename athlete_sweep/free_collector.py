@@ -15,6 +15,15 @@
   только уже-живые кандидаты (бережём его от лишнего долбления);
 - воркер держит коннект к БД только на короткие claim/store, не на время фетча.
 
+HTTP-клиент к parkrun — curl_cffi, а НЕ httpx. Замерено 24.08.2026 на 60 прокси
+с одной машины в один момент: curl_cffi дал 13 успехов из 60 при 3 заслонах WAF,
+httpx — 0 успехов при 17 заслонах. AWS WAF отдаёт httpx код 202 с заголовком
+x-amzn-waf-action вместо страницы. Дело не в отпечатке TLS и не в заголовках:
+curl_cffi проходит даже БЕЗ имперсонации браузера, а обычный curl из командной
+строки — тоже проходит. Различие где-то в связке Python-клиента с окружением
+(на Ubuntu 22.04 с Python 3.10 httpx работал, на 24.04 с 3.12 перестал).
+httpx оставлен только для скачивания списков прокси с GitHub — там прокси нет.
+
 Запуск (сервер, PM_WORLD_DSN в env): python -m athlete_sweep.free_collector
 Жив под watchdog-cron. Останов — SIGTERM/SIGINT.
 """
@@ -30,7 +39,8 @@ import gzip
 import shutil
 from pathlib import Path
 
-import httpx
+import httpx                       # только для скачивания списков прокси с GitHub
+from curl_cffi.requests import AsyncSession as CurlSession
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -221,10 +231,10 @@ async def _validate(proxy: str, sem: asyncio.Semaphore) -> tuple[str, int] | Non
     запрос. Мёртвые отваливаются по таймауту, до parkrun доходят только живые."""
     async with sem:
         try:
-            async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=12,
-                                         headers={"User-Agent": UA},
-                                         follow_redirects=True) as c:
-                r = await c.get(VALIDATE_URL)
+            async with CurlSession(timeout=12,
+                                   proxies={"http": f"http://{proxy}",
+                                            "https": f"http://{proxy}"}) as c:
+                r = await c.get(VALIDATE_URL, headers={"User-Agent": UA})
                 if r.status_code == 200 and VALIDATE_MARK in r.text:
                     return proxy, int(r.elapsed.total_seconds() * 1000)
         except Exception:
@@ -383,9 +393,11 @@ async def worker(pool: AsyncConnectionPool, proxy: str, queue: "asyncio.Queue[in
     consec = 0
     delay = float(delay) if delay else DELAY
     try:
-        async with httpx.AsyncClient(proxy=f"http://{proxy}", timeout=20,
-                                     headers={"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"},
-                                     follow_redirects=True) as client:
+        async with CurlSession(timeout=20,
+                               headers={"User-Agent": UA,
+                                        "Accept-Language": "en-GB,en;q=0.9"},
+                               proxies={"http": f"http://{proxy}",
+                                        "https": f"http://{proxy}"}) as client:
             while not _stop.is_set():
                 try:
                     aid = await asyncio.wait_for(queue.get(), timeout=30)
