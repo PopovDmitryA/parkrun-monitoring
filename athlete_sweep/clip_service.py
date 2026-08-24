@@ -132,24 +132,35 @@ def serve(path: str = DEFAULT_SOCK) -> None:
 
 # ---------------------------------------------------------------- клиент
 
+# Перезапуск сервиса — обычное дело, и модель грузится в нём около 20 секунд.
+# Значит переподключаться надо терпеливо: подождать дешевле, чем поднять
+# собственную копию весов на 800 МБ.
+_BACKOFF = (0.5, 1, 2, 4, 8, 15, 30)
+RETRY_LOCAL_AFTER = 600  # с локальной модели проверяем сокет раз в 10 минут
+
+
 class ClipClient:
     """Подменяет Clip: те же classify/rank_for, но считает чужой процесс.
 
-    При любой беде переключается на локальную модель и больше к сокету
-    не возвращается — дёргать мёртвый сервис на каждой капче незачем.
+    Рвётся соединение — переподключаемся. Только если сервис не поднялся за
+    минуту, берём модель к себе, и то не навсегда: раз в десять минут пробуем
+    вернуться. Прошлая версия сдавалась с первой же ошибки, и один перезапуск
+    сервиса переводил все боты на личные копии модели — минус 9 ГБ памяти.
     """
 
     def __init__(self, path: str = DEFAULT_SOCK) -> None:
         self.path = path
         self._sock: socket.socket | None = None
         self._local = None  # запасная локальная модель
+        self._retry_at = 0.0
         self._connect()
 
     def _connect(self) -> None:
-        # Когда боты стартуют залпом, очередь входящих может быть занята.
-        # Отступаем и пробуем снова — это дешевле, чем поднять свою модель.
+        # Залп одновременных подключений забивает очередь входящих, а перезапуск
+        # сервиса убирает сокет на время загрузки модели. Оба случая лечатся
+        # ожиданием, поэтому отступаем всё дольше — суммарно около минуты.
         last: Exception | None = None
-        for attempt in range(6):
+        for pause in _BACKOFF:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(120)
             try:
@@ -157,7 +168,7 @@ class ClipClient:
             except OSError as exc:
                 s.close()
                 last = exc
-                time.sleep(0.3 * (attempt + 1))
+                time.sleep(pause)
                 continue
             self._sock = s
             return
@@ -170,32 +181,68 @@ class ClipClient:
             from athlete_sweep.waf_solver import Clip
 
             self._local = Clip()
+            self._retry_at = time.time() + RETRY_LOCAL_AFTER
+        self._drop()
+        return self._local
+
+    def _ask(self, op: str, images: list, target: str = "") -> list:
+        tiles = []
+        for im in images:
+            b = BytesIO()
+            im.save(b, format="PNG")
+            tiles.append(base64.b64encode(b.getvalue()).decode())
+        req = {"op": op, "tiles": tiles, "target": target}
+        # Два захода: первый может упасть на соединении, пережившем перезапуск
+        # сервиса. Ошибку самого счёта не повторяем — она повторится точно так же.
+        for attempt in (0, 1):
+            if self._sock is None:
+                self._connect()
+            try:
+                _send(self._sock, req)
+                resp = _recv(self._sock)
+            except OSError as exc:
+                self._drop()
+                if attempt:
+                    raise RuntimeError(f"связь с сервисом: {exc!r}") from exc
+                continue
+            if resp is None:
+                self._drop()
+                if attempt:
+                    raise RuntimeError("сервис закрыл соединение")
+                continue
+            if not resp.get("ok"):
+                raise RuntimeError(resp.get("error", "без объяснения"))
+            return resp["result"]
+        raise RuntimeError("сервис недоступен")
+
+    def _drop(self) -> None:
         if self._sock is not None:
             try:
                 self._sock.close()
             except OSError:
                 pass
             self._sock = None
-        return self._local
 
-    def _ask(self, op: str, images: list, target: str = "") -> list:
-        if self._sock is None:
-            raise RuntimeError("нет соединения")
-        tiles = []
-        for im in images:
-            b = BytesIO()
-            im.save(b, format="PNG")
-            tiles.append(base64.b64encode(b.getvalue()).decode())
-        _send(self._sock, {"op": op, "tiles": tiles, "target": target})
-        resp = _recv(self._sock)
-        if resp is None:
-            raise RuntimeError("сервис закрыл соединение")
-        if not resp.get("ok"):
-            raise RuntimeError(resp.get("error", "без объяснения"))
-        return resp["result"]
+    def _try_return(self) -> bool:
+        """С локальной модели пробуем обратно на сервис — не чаще раза в 10 минут."""
+        if time.time() < self._retry_at:
+            return False
+        self._retry_at = time.time() + RETRY_LOCAL_AFTER
+        if not os.path.exists(self.path):
+            return False
+        try:
+            self._connect()
+        except OSError:
+            return False
+        print("  clip-сервис снова отвечает — возвращаюсь к нему", flush=True)
+        self._local = None
+        return True
+
+    def _via_service(self) -> bool:
+        return self._local is None or self._try_return()
 
     def classify(self, images: list) -> list[tuple[str, float]]:
-        if self._local is None:
+        if self._via_service():
             try:
                 return [(c, float(p)) for c, p in self._ask("classify", images)]
             except Exception as exc:  # noqa: BLE001
@@ -203,7 +250,7 @@ class ClipClient:
         return self._local.classify(images)
 
     def rank_for(self, images: list, target: str) -> list[float]:
-        if self._local is None:
+        if self._via_service():
             try:
                 return [float(x) for x in self._ask("rank", images, target)]
             except Exception as exc:  # noqa: BLE001
