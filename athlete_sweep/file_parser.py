@@ -22,8 +22,14 @@ SFTP-канал и свой коннект к БД поверх ОДНОЙ ssh-�
 ssh-транспорт; если нужно больше, запускай второй процесс парсера.
 
 Запуск:
+  на сервере, где лежит сырьё (с 24.08.2026 — домашний):
+            python -m athlete_sweep.file_parser --local --threads 4
+            (ни тоннеля, ни SFTP: файлы с диска, БД напрямую по PM_WORLD_DSN)
   macOS:    make parkrun → пункт 3   (или: python -m athlete_sweep.file_parser)
   Windows:  py -m athlete_sweep.file_parser   (из клона parkrun-monitoring)
+
+Файлы сырья после успешной записи УДАЛЯЮТСЯ (--no-delete, чтобы оставлять):
+очередь на 3 млн атлетов по два файла на каждого — это порядка 50 ГБ мусора.
 
 Зависимости (оба ОС): pip install paramiko sshtunnel "psycopg[binary]" beautifulsoup4
 Креды сервера — из переменных окружения (PM_SSH_HOST / PM_SSH_USER / PM_SSH_PASS)
@@ -136,8 +142,30 @@ def open_ssh(host: str, user: str, pwd: str):
     return cli
 
 
+class _LocalFS:
+    """Заменитель SFTP-клиента, когда сырьё лежит на этой же машине.
+
+    Появился после переезда сборщика на домашний сервер: раньше free_collector
+    складывал файлы на VPS, а парсер жил на Маке и лез к ним по SFTP. Теперь и
+    сбор, и разбор на одной машине — ходить по SSH самому к себе бессмысленно,
+    да и несколько потоков упираются в MaxSessions у sshd.
+
+    Реализует ровно те два метода, что использует парсер: open() и remove().
+    """
+
+    @staticmethod
+    def open(path, mode="rb"):
+        return open(path, mode)
+
+    @staticmethod
+    def remove(path) -> None:
+        os.remove(path)
+
+
 def sftp_channel(ssh):
-    """Отдельный SFTP-канал (на поток) поверх общего ssh-транспорта."""
+    """Канал доступа к файлам на поток: SFTP поверх общего ssh, либо локальный ФС."""
+    if ssh is None:
+        return _LocalFS()
     return ssh.get_transport().open_sftp_client()
 
 
@@ -198,7 +226,8 @@ def remote_path(raw_dir: str, aid: int, kind: str) -> str:
 def read_html(sftp, path: str) -> str | None:
     try:
         with sftp.open(path, "rb") as fh:
-            fh.prefetch()
+            if hasattr(fh, "prefetch"):   # у локального файла его нет
+                fh.prefetch()
             raw = fh.read()
     except IOError:
         return None
@@ -341,28 +370,40 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=BATCH, help="размер брони за раз")
     ap.add_argument("--threads", type=int, default=1,
                     help="сколько страниц обрабатывать параллельно (1 = как раньше)")
-    ap.add_argument("--delete", action="store_true",
-                    help="удалять файлы сырья после успешной записи (по умолчанию НЕТ)")
+    ap.add_argument("--delete", action=argparse.BooleanOptionalAction, default=True,
+                    help="удалять файлы сырья после успешной записи (по умолчанию ДА)")
+    ap.add_argument("--local", action="store_true",
+                    help="сырьё и БД на этой же машине: без SSH-тоннеля и SFTP")
+    ap.add_argument("--dsn", default="",
+                    help="DSN для --local (иначе PM_WORLD_DSN из окружения/.env)")
     ap.add_argument("--raw-dir", default=os.getenv("PM_RAW_DIR", DEFAULT_RAW_DIR),
                     help="папка сырья на сервере")
     ap.add_argument("--once", action="store_true", help="разобрать что есть и выйти (не ждать)")
     args = ap.parse_args()
     threads = max(1, args.threads)
 
-    host = _cred("PM_SSH_HOST", "TEMP_SSH_HOST", "PROD_SSH_HOST",
-                 default="195.58.34.112", prompt="SSH-хост сервера: ")
-    user = _cred("PM_SSH_USER", "TEMP_SSH_USER", "PROD_SSH_USER",
-                 default="viewer", prompt="SSH-пользователь: ")
-    pwd = _cred("PM_SSH_PASS", "TEMP_SSH_PASSWORD",
-                secret=True, prompt="SSH-пароль: ")
-    if not pwd:
-        sys.exit("нет SSH-пароля (PM_SSH_PASS / .env / ввод) — прервано")
-
     print(f"[{platform.system()}] парсер {socket.gethostname()}:{os.getpid()} · "
           f"потоков: {threads}", flush=True)
-    print(f"подключаюсь к {user}@{host} (БД-туннель + SFTP)…", flush=True)
-    tun, dsn = open_db(host, user, pwd)
-    ssh = open_ssh(host, user, pwd)
+
+    if args.local:
+        # Всё на этой машине: ни тоннеля, ни SFTP — читаем диск и БД напрямую.
+        tun = ssh = None
+        dsn = args.dsn or _cred("PM_WORLD_DSN", "PM_WORLD_DSN")
+        if not dsn:
+            sys.exit("нет DSN: задай --dsn или PM_WORLD_DSN в окружении/.env")
+        print(f"локальный режим · БД напрямую · папка {args.raw_dir}", flush=True)
+    else:
+        host = _cred("PM_SSH_HOST", "TEMP_SSH_HOST", "PROD_SSH_HOST",
+                     default="195.58.34.112", prompt="SSH-хост сервера: ")
+        user = _cred("PM_SSH_USER", "TEMP_SSH_USER", "PROD_SSH_USER",
+                     default="viewer", prompt="SSH-пользователь: ")
+        pwd = _cred("PM_SSH_PASS", "TEMP_SSH_PASSWORD",
+                    secret=True, prompt="SSH-пароль: ")
+        if not pwd:
+            sys.exit("нет SSH-пароля (PM_SSH_PASS / .env / ввод) — прервано")
+        print(f"подключаюсь к {user}@{host} (БД-туннель + SFTP)…", flush=True)
+        tun, dsn = open_db(host, user, pwd)
+        ssh = open_ssh(host, user, pwd)
     print(f"на связи · папка {args.raw_dir} · удаление файлов: "
           f"{'да' if args.delete else 'нет'}", flush=True)
 
