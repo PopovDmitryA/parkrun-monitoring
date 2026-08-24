@@ -21,6 +21,7 @@ import socketserver
 import struct
 import sys
 import threading
+import time
 from io import BytesIO
 
 DEFAULT_SOCK = os.getenv("PM_CLIP_SOCK") or "/run/pm-clip/clip.sock"
@@ -74,25 +75,38 @@ class _Handler(socketserver.BaseRequestHandler):
                     return
 
 
+# Сколько счётов идёт разом и сколько потоков torch даём каждому. Произведение
+# держим около числа ядер: больше — потоки начнут толкаться и станет медленнее.
+PAR = int(os.getenv("PM_CLIP_PAR") or 3)
+THREADS = int(os.getenv("PM_CLIP_THREADS") or max(2, (os.cpu_count() or 4) // PAR))
+
+
 class _Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
+    # По умолчанию socketserver держит очередь входящих в 5 штук, и при
+    # одновременном рестарте всех ботов остальные получают EAGAIN и уходят
+    # поднимать модель у себя — ровно то, ради чего сервис и затевался.
+    request_queue_size = 256
 
     def __init__(self, path: str) -> None:
         super().__init__(path, _Handler)
         from athlete_sweep.waf_solver import Clip
 
+        import torch
+
+        torch.set_num_threads(THREADS)
         self._clip = Clip()
-        # Одна модель на всех: torch считает под замком, иначе несколько ботов
-        # разом раздёргают потоки и посчитают медленнее, чем по очереди.
-        self._lock = threading.Lock()
+        # Не один замок, а пропускник на PAR мест: одиночный счёт всё равно не
+        # занимает все ядра, поэтому пара-тройка параллельных даёт больше суммарно.
+        self._gate = threading.BoundedSemaphore(PAR)
 
     def run(self, req: dict) -> list:
         from PIL import Image
 
         imgs = [Image.open(BytesIO(base64.b64decode(t))).convert("RGB")
                 for t in req["tiles"]]
-        with self._lock:
+        with self._gate:
             if req["op"] == "classify":
                 return [[c, p] for c, p in self._clip.classify(imgs)]
             if req["op"] == "rank":
@@ -106,7 +120,8 @@ def serve(path: str = DEFAULT_SOCK) -> None:
         os.unlink(path)
     srv = _Server(path)
     os.chmod(path, 0o660)
-    print(f"clip-сервис слушает {path}", flush=True)
+    print(f"clip-сервис слушает {path} · разом {PAR} × {THREADS} потоков torch",
+          flush=True)
     try:
         srv.serve_forever()
     finally:
@@ -131,10 +146,22 @@ class ClipClient:
         self._connect()
 
     def _connect(self) -> None:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(120)
-        s.connect(self.path)
-        self._sock = s
+        # Когда боты стартуют залпом, очередь входящих может быть занята.
+        # Отступаем и пробуем снова — это дешевле, чем поднять свою модель.
+        last: Exception | None = None
+        for attempt in range(6):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(120)
+            try:
+                s.connect(self.path)
+            except OSError as exc:
+                s.close()
+                last = exc
+                time.sleep(0.3 * (attempt + 1))
+                continue
+            self._sock = s
+            return
+        raise last if last else OSError(f"не подключиться к {self.path}")
 
     def _fallback(self, why: str):
         if self._local is None:
