@@ -258,10 +258,16 @@ async def replenish(pool: AsyncConnectionPool) -> None:
     # циклов покрываем всех), чтобы проход был ограничен по времени и не забивал
     # event-loop — иначе воркеры голодают и «работает, но не парсит».
     global _cand_offset
-    if len(cand) > CAND_CAP:
-        start = _cand_offset % len(cand)
+    total = len(cand)          # ДО среза: ниже len(cand) станет равен CAND_CAP
+    if total > CAND_CAP:
+        start = _cand_offset % total
         cand = (cand + cand)[start:start + CAND_CAP]
-        _cand_offset = (start + CAND_CAP) % max(1, len(cand))
+        # Остаток берём от ПОЛНОГО списка. Раньше здесь стоял len(cand), который
+        # к этому моменту уже равен CAND_CAP, поэтому выходило (start+CAP) % CAP =
+        # start, и окно навсегда замирало на первом срезе. Из 180 тысяч
+        # кандидатов циклами перепроверялись одни и те же 12 тысяч — отсюда
+        # вечное «parkrun-живых +0» в логах.
+        _cand_offset = (start + CAND_CAP) % total
     # Ступень 1 — дешёвый TCP-префильтр.
     tcp_sem = asyncio.Semaphore(TCP_CONC)
     alive = [r for r in await asyncio.gather(*(_tcp_alive(p, tcp_sem) for p in cand)) if r]
